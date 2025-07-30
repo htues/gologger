@@ -1,0 +1,256 @@
+package http
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
+	"github.com/hftamayo/gologgermservice/internal/domain/entities"
+	"github.com/hftamayo/gologgermservice/internal/ports"
+	"go.uber.org/zap"
+)
+
+// Handler handles HTTP requests for the logger service
+type Handler struct {
+	loggerService ports.LoggerService
+	logger        *zap.Logger
+}
+
+// NewHandler creates a new HTTP handler
+func NewHandler(loggerService ports.LoggerService, logger *zap.Logger) *Handler {
+	return &Handler{
+		loggerService: loggerService,
+		logger:        logger,
+	}
+}
+
+// LogEntryRequest represents the request body for logging an entry
+type LogEntryRequest struct {
+	EventTimestamp *time.Time     `json:"event_timestamp,omitempty"`
+	Level          entities.LogLevel `json:"level"`
+	ServiceName    string         `json:"serviceName"`
+	Data           entities.LogData `json:"data"`
+}
+
+// LogEntryResponse represents the response for a log entry
+type LogEntryResponse struct {
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Status    string    `json:"status"`
+}
+
+// GetLogsRequest represents the request parameters for getting logs
+type GetLogsRequest struct {
+	ServiceName string            `json:"serviceName,omitempty"`
+	Level       entities.LogLevel `json:"level,omitempty"`
+	Limit       int               `json:"limit,omitempty"`
+}
+
+// RegisterRoutes registers all HTTP routes
+func (h *Handler) RegisterRoutes(router *mux.Router) {
+	router.HandleFunc("/logs", h.LogEntry).Methods("POST")
+	router.HandleFunc("/logs", h.GetLogs).Methods("GET")
+	router.HandleFunc("/logs/stream", h.StreamLogs).Methods("GET")
+	router.HandleFunc("/services", h.GetServices).Methods("GET")
+	router.HandleFunc("/stats", h.GetStats).Methods("GET")
+	router.HandleFunc("/health", h.HealthCheck).Methods("GET")
+}
+
+// LogEntry handles POST /logs
+func (h *Handler) LogEntry(w http.ResponseWriter, r *http.Request) {
+	var req LogEntryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Error("Failed to decode request body", zap.Error(err))
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.ServiceName == "" {
+		http.Error(w, "serviceName is required", http.StatusBadRequest)
+		return
+	}
+	if req.Data.Message == "" {
+		http.Error(w, "data.message is required", http.StatusBadRequest)
+		return
+	}
+
+	// Create log entry
+	entry := entities.LogEntry{
+		Timestamp:      time.Now(),
+		EventTimestamp: time.Now(),
+		Level:          req.Level,
+		ServiceName:    req.ServiceName,
+		Data:           req.Data,
+	}
+
+	// Use event timestamp if provided
+	if req.EventTimestamp != nil {
+		entry.EventTimestamp = *req.EventTimestamp
+	}
+
+	// Store the log entry
+	ctx := r.Context()
+	if err := h.loggerService.LogEntry(ctx, entry); err != nil {
+		h.logger.Error("Failed to store log entry", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Return response
+	response := LogEntryResponse{
+		ID:        entry.ID,
+		Timestamp: entry.Timestamp,
+		Status:    "success",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(response)
+}
+
+// GetLogs handles GET /logs
+func (h *Handler) GetLogs(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	serviceName := r.URL.Query().Get("serviceName")
+	levelStr := r.URL.Query().Get("level")
+	limitStr := r.URL.Query().Get("limit")
+
+	var level entities.LogLevel
+	if levelStr != "" {
+		level = entities.LogLevel(levelStr)
+	}
+
+	limit := 100 // Default limit
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	// Get logs
+	ctx := r.Context()
+	logs, err := h.loggerService.GetLogs(ctx, serviceName, level, limit)
+	if err != nil {
+		h.logger.Error("Failed to get logs", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Return response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"logs":  logs,
+		"count": len(logs),
+	})
+}
+
+// StreamLogs handles GET /logs/stream (WebSocket)
+func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	serviceName := r.URL.Query().Get("serviceName")
+	levelStr := r.URL.Query().Get("level")
+
+	var level entities.LogLevel
+	if levelStr != "" {
+		level = entities.LogLevel(levelStr)
+	}
+
+	// Upgrade to WebSocket
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all origins for now
+		},
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	// Create context for the stream
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	// Start log stream
+	stream, err := h.loggerService.StreamLogs(ctx, serviceName, level)
+	if err != nil {
+		h.logger.Error("Failed to start log stream", zap.Error(err))
+		conn.WriteJSON(map[string]string{"error": "Failed to start stream"})
+		return
+	}
+
+	// Send initial message
+	conn.WriteJSON(map[string]string{"status": "connected"})
+
+	// Stream logs
+	for {
+		select {
+		case entry, ok := <-stream:
+			if !ok {
+				// Stream closed
+				conn.WriteJSON(map[string]string{"status": "disconnected"})
+				return
+			}
+
+			// Send log entry
+			if err := conn.WriteJSON(entry); err != nil {
+				h.logger.Error("Failed to send log entry via WebSocket", zap.Error(err))
+				return
+			}
+
+		case <-ctx.Done():
+			// Context cancelled
+			return
+		}
+	}
+}
+
+// GetServices handles GET /services
+func (h *Handler) GetServices(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	services, err := h.loggerService.GetServiceNames(ctx)
+	if err != nil {
+		h.logger.Error("Failed to get service names", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"services": services,
+		"count":    len(services),
+	})
+}
+
+// GetStats handles GET /stats
+func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
+	serviceName := r.URL.Query().Get("serviceName")
+
+	ctx := r.Context()
+	stats, err := h.loggerService.GetLogStats(ctx, serviceName)
+	if err != nil {
+		h.logger.Error("Failed to get log stats", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// HealthCheck handles GET /health
+func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now(),
+		"service":   "logger-service",
+	})
+} 
