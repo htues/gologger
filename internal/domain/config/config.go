@@ -2,14 +2,15 @@ package config
 
 import (
 	"time"
-	"github.com/hftamayo/gologgermservice/internal/domain/entities"
+
+	"github.com/hftamayo/gologger/internal/domain/entities"
 )
 
 // Config holds all configuration for the logger service
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Storage  StorageConfig  `mapstructure:"storage"`
-	Logging  LoggingConfig  `mapstructure:"logging"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Storage   StorageConfig   `mapstructure:"storage"`
+	Logging   LoggingConfig   `mapstructure:"logging"`
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 }
 
@@ -24,10 +25,10 @@ type ServerConfig struct {
 
 // StorageConfig holds storage-related configuration
 type StorageConfig struct {
-	DataDir      string        `mapstructure:"data_dir"`
-	RotationDays int           `mapstructure:"rotation_days"`
-	MaxFileSize  int64         `mapstructure:"max_file_size"`
-	BufferSize   int           `mapstructure:"buffer_size"`
+	DataDir      string `mapstructure:"data_dir"`
+	RotationDays int    `mapstructure:"rotation_days"`
+	MaxFileSize  int64  `mapstructure:"max_file_size"`
+	BufferSize   int    `mapstructure:"buffer_size"`
 }
 
 // LoggingConfig holds logging-related configuration
@@ -71,4 +72,4 @@ func DefaultConfig() *Config {
 			Window:      1 * time.Minute,
 		},
 	}
-} 
+}

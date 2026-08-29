@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hftamayo/gologgermservice/internal/domain/entities"
-	"github.com/hftamayo/gologgermservice/internal/ports"
+	"github.com/hftamayo/gologger/internal/domain/entities"
+	"github.com/hftamayo/gologger/internal/ports"
 	"go.uber.org/zap"
 )
 
@@ -39,7 +39,7 @@ func (ls *LoggerServiceImpl) LogEntry(ctx context.Context, entry entities.LogEnt
 
 	// Check if the log level should be processed
 	if !entry.IsLevelEnabled(*ls.config) {
-		ls.logger.Debug("Log entry filtered by level", 
+		ls.logger.Debug("Log entry filtered by level",
 			zap.String("level", entry.GetLogLevel()),
 			zap.String("serviceName", entry.ServiceName))
 		return nil
@@ -60,7 +60,7 @@ func (ls *LoggerServiceImpl) LogEntry(ctx context.Context, entry entities.LogEnt
 
 	// Store the log entry
 	if err := ls.storage.Store(ctx, entry); err != nil {
-		ls.logger.Error("Failed to store log entry", 
+		ls.logger.Error("Failed to store log entry",
 			zap.Error(err),
 			zap.String("serviceName", entry.ServiceName))
 		return err
@@ -69,7 +69,7 @@ func (ls *LoggerServiceImpl) LogEntry(ctx context.Context, entry entities.LogEnt
 	// Broadcast to streams
 	ls.broadcastToStreams(entry)
 
-	ls.logger.Debug("Log entry stored successfully", 
+	ls.logger.Debug("Log entry stored successfully",
 		zap.String("id", entry.ID),
 		zap.String("serviceName", entry.ServiceName),
 		zap.String("level", entry.GetLogLevel()))
@@ -85,13 +85,13 @@ func (ls *LoggerServiceImpl) GetLogs(ctx context.Context, serviceName string, le
 
 	logs, err := ls.storage.Get(ctx, serviceName, level, limit)
 	if err != nil {
-		ls.logger.Error("Failed to retrieve logs", 
+		ls.logger.Error("Failed to retrieve logs",
 			zap.Error(err),
 			zap.String("serviceName", serviceName))
 		return nil, err
 	}
 
-	ls.logger.Debug("Retrieved logs", 
+	ls.logger.Debug("Retrieved logs",
 		zap.Int("count", len(logs)),
 		zap.String("serviceName", serviceName))
 
@@ -101,7 +101,7 @@ func (ls *LoggerServiceImpl) GetLogs(ctx context.Context, serviceName string, le
 // StreamLogs provides real-time log streaming via WebSocket
 func (ls *LoggerServiceImpl) StreamLogs(ctx context.Context, serviceName string, level entities.LogLevel) (<-chan entities.LogEntry, error) {
 	streamKey := serviceName + "_" + string(level)
-	
+
 	ls.streamsMux.Lock()
 	defer ls.streamsMux.Unlock()
 
@@ -118,7 +118,7 @@ func (ls *LoggerServiceImpl) StreamLogs(ctx context.Context, serviceName string,
 		close(stream)
 	}()
 
-	ls.logger.Info("Log stream started", 
+	ls.logger.Info("Log stream started",
 		zap.String("serviceName", serviceName),
 		zap.String("level", string(level)))
 
@@ -140,7 +140,7 @@ func (ls *LoggerServiceImpl) GetServiceNames(ctx context.Context) ([]string, err
 func (ls *LoggerServiceImpl) GetLogStats(ctx context.Context, serviceName string) (*ports.LogStats, error) {
 	stats, err := ls.storage.GetStats(ctx, serviceName)
 	if err != nil {
-		ls.logger.Error("Failed to get log stats", 
+		ls.logger.Error("Failed to get log stats",
 			zap.Error(err),
 			zap.String("serviceName", serviceName))
 		return nil, err
@@ -148,8 +148,8 @@ func (ls *LoggerServiceImpl) GetLogStats(ctx context.Context, serviceName string
 
 	// Convert storage stats to log stats
 	logStats := &ports.LogStats{
-		TotalEntries:    stats.TotalSize,
-		EntriesByLevel:  make(map[string]int64),
+		TotalEntries:     stats.TotalSize,
+		EntriesByLevel:   make(map[string]int64),
 		EntriesByService: make(map[string]int64),
 	}
 
@@ -172,7 +172,7 @@ func (ls *LoggerServiceImpl) broadcastToStreams(entry entities.LogEntry) {
 				// Successfully sent
 			default:
 				// Channel is full, skip this entry
-				ls.logger.Warn("Stream channel full, dropping log entry", 
+				ls.logger.Warn("Stream channel full, dropping log entry",
 					zap.String("streamKey", key))
 			}
 		}
@@ -199,4 +199,4 @@ func randomString(length int) string {
 		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
 	}
 	return string(b)
-} 
+}

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hftamayo/gologgermservice/internal/domain/entities"
-	"github.com/hftamayo/gologgermservice/internal/ports"
+	"github.com/hftamayo/gologger/internal/domain/entities"
+	"github.com/hftamayo/gologger/internal/ports"
 	"go.uber.org/zap"
 )
 
@@ -267,7 +267,7 @@ func (jfs *JSONFileStorage) flushBuffer() error {
 	// Write each service group to its file
 	for serviceName, entries := range serviceGroups {
 		filename := jfs.getFilename(serviceName)
-		
+
 		// Read existing entries
 		existingEntries, err := jfs.readFile(filename)
 		if err != nil && !os.IsNotExist(err) {
@@ -298,7 +298,7 @@ func (jfs *JSONFileStorage) getFilename(serviceName string) string {
 		daysUntilSunday = 7
 	}
 	endOfWeek := now.AddDate(0, 0, daysUntilSunday)
-	
+
 	dateStr := endOfWeek.Format("010206") // MM/DD/YY format
 	return filepath.Join(jfs.dataDir, fmt.Sprintf("%s_%s.json", serviceName, dateStr))
 }
@@ -370,4 +370,4 @@ func (jfs *JSONFileStorage) startBackgroundTasks() {
 			jfs.logger.Error("Failed to rotate logs", zap.Error(err))
 		}
 	}
-} 
+}

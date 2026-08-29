@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/hftamayo/gologgermservice/internal/adapters/config"
-	"github.com/hftamayo/gologgermservice/internal/adapters/http"
-	"github.com/hftamayo/gologgermservice/internal/adapters/storage"
-	"github.com/hftamayo/gologgermservice/internal/domain/services"
+	"github.com/hftamayo/gologger/internal/adapters/config"
+	"github.com/hftamayo/gologger/internal/adapters/http"
+	"github.com/hftamayo/gologger/internal/adapters/storage"
+	"github.com/hftamayo/gologger/internal/domain/services"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -33,7 +33,7 @@ func main() {
 		logger.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
-	logger.Info("Configuration loaded", 
+	logger.Info("Configuration loaded",
 		zap.String("server.port", cfg.Server.Port),
 		zap.String("storage.data_dir", cfg.Storage.DataDir))
 
@@ -116,4 +116,4 @@ func initLogger() *zap.Logger {
 	}
 
 	return logger
-} 
+}

@@ -9,8 +9,8 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	"github.com/hftamayo/gologgermservice/internal/domain/entities"
-	"github.com/hftamayo/gologgermservice/internal/ports"
+	"github.com/hftamayo/gologger/internal/domain/entities"
+	"github.com/hftamayo/gologger/internal/ports"
 	"go.uber.org/zap"
 )
 
@@ -30,10 +30,10 @@ func NewHandler(loggerService ports.LoggerService, logger *zap.Logger) *Handler 
 
 // LogEntryRequest represents the request body for logging an entry
 type LogEntryRequest struct {
-	EventTimestamp *time.Time     `json:"event_timestamp,omitempty"`
+	EventTimestamp *time.Time        `json:"event_timestamp,omitempty"`
 	Level          entities.LogLevel `json:"level"`
-	ServiceName    string         `json:"serviceName"`
-	Data           entities.LogData `json:"data"`
+	ServiceName    string            `json:"serviceName"`
+	Data           entities.LogData  `json:"data"`
 }
 
 // LogEntryResponse represents the response for a log entry
@@ -253,4 +253,4 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		"timestamp": time.Now(),
 		"service":   "logger-service",
 	})
-} 
+}

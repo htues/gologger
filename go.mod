@@ -1,4 +1,4 @@
-module github.com/hftamayo/gologgermservice
+module github.com/hftamayo/gologger
 
 go 1.22.2
 
