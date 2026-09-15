@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/hftamayo/gologger/internal/contracts"
 )
+
+type EventProcessorService struct{}
 
 const (
     maxServiceLength   = 128
@@ -292,4 +295,15 @@ func generateEventID() string {
     }
 
     return "evt-" + hex.EncodeToString(buffer)
+}
+
+func (EventProcessorService) Process(
+    ctx context.Context,
+    event contracts.Event,
+) (contracts.Event, error) {
+    if err := ctx.Err(); err != nil {
+        return contracts.Event{}, err
+    }
+
+    return ProcessEvent(event, time.Now)
 }
