@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,362 +14,457 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hftamayo/gologger/internal/domain/entities"
-	"github.com/hftamayo/gologger/internal/ports"
+	"github.com/hftamayo/gologger/internal/contracts"
 	"go.uber.org/zap"
 )
 
-// JSONFileStorage implements the StorageRepository interface using JSON files
+var (
+    ErrEventNotFound = errors.New("event not found")
+    ErrStoreClosed   = errors.New("event store is closed")
+    ErrDuplicateEvent = errors.New("event already exists")
+)
+
 type JSONFileStorage struct {
-	dataDir      string
-	rotationDays int
-	maxFileSize  int64
-	bufferSize   int
-	logger       *zap.Logger
-	mutex        sync.RWMutex
-	buffer       []entities.LogEntry
-	bufferMutex  sync.Mutex
+    mu sync.RWMutex
+
+    dataDir       string
+    maxFileSize   int64
+    retentionDays int
+    logger        *zap.Logger
+    knownIDs      map[string]struct{}
+    closed        bool
 }
 
-// NewJSONFileStorage creates a new JSON file storage instance
-func NewJSONFileStorage(dataDir string, rotationDays int, maxFileSize int64, bufferSize int, logger *zap.Logger) (*JSONFileStorage, error) {
-	// Create data directory if it doesn't exist
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
+// NewJSONFileStorage creates a JSON Lines event store.
+//
+// Events are written to weekly files. When maxFileSize is exceeded,
+// another numbered file is created for the same week.
+func NewJSONFileStorage(
+    dataDir string,
+    maxFileSize int64,
+    retentionDays int,
+    logger *zap.Logger,
+) (*JSONFileStorage, error) {
+    if strings.TrimSpace(dataDir) == "" {
+        return nil, errors.New("data directory is required")
+    }
 
-	storage := &JSONFileStorage{
-		dataDir:      dataDir,
-		rotationDays: rotationDays,
-		maxFileSize:  maxFileSize,
-		bufferSize:   bufferSize,
-		logger:       logger,
-		buffer:       make([]entities.LogEntry, 0, bufferSize),
-	}
+    if maxFileSize <= 0 {
+        maxFileSize = 10 * 1024 * 1024
+    }
 
-	// Start background tasks
-	go storage.startBackgroundTasks()
+    if retentionDays <= 0 {
+        retentionDays = 30
+    }
 
-	return storage, nil
+    if logger == nil {
+        logger = zap.NewNop()
+    }
+
+    if err := os.MkdirAll(dataDir, 0750); err != nil {
+        return nil, fmt.Errorf("create data directory: %w", err)
+    }
+
+    store := &JSONFileStorage{
+        dataDir:       dataDir,
+        maxFileSize:   maxFileSize,
+        retentionDays: retentionDays,
+        logger:        logger,
+        knownIDs:      make(map[string]struct{}),
+    }
+
+    if err := store.loadEventIDs(); err != nil {
+        return nil, fmt.Errorf("load existing events: %w", err)
+    }
+
+    return store, nil
 }
 
-// Store stores a log entry
-func (jfs *JSONFileStorage) Store(ctx context.Context, entry entities.LogEntry) error {
-	jfs.bufferMutex.Lock()
-	defer jfs.bufferMutex.Unlock()
+func (store *JSONFileStorage) Store(
+    ctx context.Context,
+    event contracts.Event,
+) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
 
-	// Add to buffer
-	jfs.buffer = append(jfs.buffer, entry)
+    if event.EventID == "" {
+        return errors.New("event ID is required")
+    }
 
-	// Flush buffer if it's full
-	if len(jfs.buffer) >= jfs.bufferSize {
-		return jfs.flushBuffer()
-	}
+    data, err := json.Marshal(event)
+    if err != nil {
+        return fmt.Errorf("encode event: %w", err)
+    }
 
-	return nil
+    data = append(data, '\n')
+
+    store.mu.Lock()
+    defer store.mu.Unlock()
+
+    if store.closed {
+        return ErrStoreClosed
+    }
+
+    if _, exists := store.knownIDs[event.EventID]; exists {
+        return ErrDuplicateEvent
+    }
+
+    filename, err := store.fileForWrite(len(data), time.Now().UTC())
+    if err != nil {
+        return err
+    }
+
+    file, err := os.OpenFile(
+        filename,
+        os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+        0600,
+    )
+    if err != nil {
+        return fmt.Errorf("open event file: %w", err)
+    }
+
+    _, writeErr := file.Write(data)
+    if writeErr == nil {
+        // Flush each accepted event so Store returns only after durable handoff.
+        writeErr = file.Sync()
+    }
+
+    closeErr := file.Close()
+    if writeErr != nil {
+        return fmt.Errorf("write event: %w", writeErr)
+    }
+    if closeErr != nil {
+        return fmt.Errorf("close event file: %w", closeErr)
+    }
+
+    store.knownIDs[event.EventID] = struct{}{}
+    return nil
 }
 
-// Get retrieves log entries with filtering
-func (jfs *JSONFileStorage) Get(ctx context.Context, serviceName string, level entities.LogLevel, limit int) ([]entities.LogEntry, error) {
-	jfs.mutex.RLock()
-	defer jfs.mutex.RUnlock()
+func (store *JSONFileStorage) Get(
+    ctx context.Context,
+    eventID string,
+) (contracts.Event, error) {
+    if err := ctx.Err(); err != nil {
+        return contracts.Event{}, err
+    }
 
-	// Flush buffer first to ensure we have latest data
-	jfs.bufferMutex.Lock()
-	if len(jfs.buffer) > 0 {
-		if err := jfs.flushBuffer(); err != nil {
-			jfs.bufferMutex.Unlock()
-			return nil, err
-		}
-	}
-	jfs.bufferMutex.Unlock()
+    store.mu.RLock()
+    defer store.mu.RUnlock()
 
-	var allEntries []entities.LogEntry
+    if store.closed {
+        return contracts.Event{}, ErrStoreClosed
+    }
 
-	// Read from all files for the service
-	files, err := jfs.getServiceFiles(serviceName)
-	if err != nil {
-		return nil, err
-	}
+    if _, exists := store.knownIDs[eventID]; !exists {
+        return contracts.Event{}, ErrEventNotFound
+    }
 
-	for _, file := range files {
-		entries, err := jfs.readFile(file)
-		if err != nil {
-			jfs.logger.Warn("Failed to read file", zap.String("file", file), zap.Error(err))
-			continue
-		}
+    files, err := store.eventFiles()
+    if err != nil {
+        return contracts.Event{}, err
+    }
 
-		// Filter entries
-		for _, entry := range entries {
-			if (serviceName == "" || entry.ServiceName == serviceName) &&
-				(level == "" || entry.Level == level) {
-				allEntries = append(allEntries, entry)
-			}
-		}
-	}
+    for _, filename := range files {
+        events, err := readEvents(filename)
+        if err != nil {
+            return contracts.Event{}, err
+        }
 
-	// Sort by timestamp (newest first)
-	sort.Slice(allEntries, func(i, j int) bool {
-		return allEntries[i].Timestamp.After(allEntries[j].Timestamp)
-	})
+        for _, event := range events {
+            if event.EventID == eventID {
+                return event, nil
+            }
+        }
+    }
 
-	// Apply limit
-	if limit > 0 && len(allEntries) > limit {
-		allEntries = allEntries[:limit]
-	}
-
-	return allEntries, nil
+    return contracts.Event{}, ErrEventNotFound
 }
 
-// GetServiceNames returns all available service names
-func (jfs *JSONFileStorage) GetServiceNames(ctx context.Context) ([]string, error) {
-	jfs.mutex.RLock()
-	defer jfs.mutex.RUnlock()
+func (store *JSONFileStorage) Query(
+    ctx context.Context,
+    filter contracts.EventFilter,
+) ([]contracts.Event, error) {
+    if err := ctx.Err(); err != nil {
+        return nil, err
+    }
 
-	services := make(map[string]bool)
+    store.mu.RLock()
+    defer store.mu.RUnlock()
 
-	// Read all files in data directory
-	err := filepath.WalkDir(jfs.dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+    if store.closed {
+        return nil, ErrStoreClosed
+    }
 
-		if !d.IsDir() && strings.HasSuffix(path, ".json") {
-			// Extract service name from filename
-			filename := filepath.Base(path)
-			serviceName := strings.TrimSuffix(filename, filepath.Ext(filename))
-			// Remove date suffix
-			if idx := strings.LastIndex(serviceName, "_"); idx != -1 {
-				serviceName = serviceName[:idx]
-			}
-			services[serviceName] = true
-		}
+    files, err := store.eventFiles()
+    if err != nil {
+        return nil, err
+    }
 
-		return nil
-	})
+    result := make([]contracts.Event, 0)
 
-	if err != nil {
-		return nil, err
-	}
+    for _, filename := range files {
+        events, err := readEvents(filename)
+        if err != nil {
+            return nil, err
+        }
 
-	// Convert map to slice
-	var result []string
-	for service := range services {
-		result = append(result, service)
-	}
+        for _, event := range events {
+            if matchesFilter(event, filter) {
+                result = append(result, event)
+            }
+        }
+    }
 
-	sort.Strings(result)
-	return result, nil
+    sort.SliceStable(result, func(i, j int) bool {
+        return result[i].Timestamp.Before(result[j].Timestamp)
+    })
+
+    return result, nil
 }
 
-// GetStats returns storage statistics
-func (jfs *JSONFileStorage) GetStats(ctx context.Context, serviceName string) (*ports.StorageStats, error) {
-	jfs.mutex.RLock()
-	defer jfs.mutex.RUnlock()
+func (store *JSONFileStorage) Health(ctx context.Context) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
 
-	stats := &ports.StorageStats{
-		TotalFiles: 0,
-		TotalSize:  0,
-	}
+    store.mu.RLock()
+    defer store.mu.RUnlock()
 
-	files, err := jfs.getServiceFiles(serviceName)
-	if err != nil {
-		return nil, err
-	}
+    if store.closed {
+        return ErrStoreClosed
+    }
 
-	for _, file := range files {
-		fileInfo, err := os.Stat(file)
-		if err != nil {
-			continue
-		}
+    info, err := os.Stat(store.dataDir)
+    if err != nil {
+        return err
+    }
 
-		stats.TotalFiles++
-		stats.TotalSize += fileInfo.Size()
+    if !info.IsDir() {
+        return errors.New("event data path is not a directory")
+    }
 
-		if stats.OldestFile == "" || fileInfo.ModTime().Before(time.Now()) {
-			stats.OldestFile = filepath.Base(file)
-		}
-		if stats.NewestFile == "" || fileInfo.ModTime().After(time.Now()) {
-			stats.NewestFile = filepath.Base(file)
-		}
-	}
-
-	return stats, nil
+    return nil
 }
 
-// RotateLogs performs log rotation if needed
-func (jfs *JSONFileStorage) RotateLogs(ctx context.Context) error {
-	jfs.mutex.Lock()
-	defer jfs.mutex.Unlock()
+func (store *JSONFileStorage) Close() error {
+    store.mu.Lock()
+    defer store.mu.Unlock()
 
-	// Flush buffer first
-	jfs.bufferMutex.Lock()
-	if len(jfs.buffer) > 0 {
-		if err := jfs.flushBuffer(); err != nil {
-			jfs.bufferMutex.Unlock()
-			return err
-		}
-	}
-	jfs.bufferMutex.Unlock()
+    if store.closed {
+        return nil
+    }
 
-	// Check for old files and remove them
-	cutoffDate := time.Now().AddDate(0, 0, -jfs.rotationDays)
-
-	err := filepath.WalkDir(jfs.dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !d.IsDir() && strings.HasSuffix(path, ".json") {
-			fileInfo, err := d.Info()
-			if err != nil {
-				return err
-			}
-
-			if fileInfo.ModTime().Before(cutoffDate) {
-				if err := os.Remove(path); err != nil {
-					jfs.logger.Warn("Failed to remove old log file", zap.String("file", path), zap.Error(err))
-				} else {
-					jfs.logger.Info("Removed old log file", zap.String("file", path))
-				}
-			}
-		}
-
-		return nil
-	})
-
-	return err
+    store.closed = true
+    return nil
 }
 
-// Close closes the storage connection
-func (jfs *JSONFileStorage) Close() error {
-	jfs.bufferMutex.Lock()
-	defer jfs.bufferMutex.Unlock()
+// Rotate removes files older than retentionDays.
+func (store *JSONFileStorage) Rotate(ctx context.Context) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
 
-	// Flush remaining buffer
-	if len(jfs.buffer) > 0 {
-		return jfs.flushBuffer()
-	}
+    store.mu.Lock()
+    defer store.mu.Unlock()
 
-	return nil
+    if store.closed {
+        return ErrStoreClosed
+    }
+
+    cutoff := time.Now().UTC().AddDate(0, 0, -store.retentionDays)
+
+    files, err := store.eventFiles()
+    if err != nil {
+        return err
+    }
+
+    for _, filename := range files {
+        info, err := os.Stat(filename)
+        if err != nil {
+            if os.IsNotExist(err) {
+                continue
+            }
+            return err
+        }
+
+        if info.ModTime().Before(cutoff) {
+            if err := os.Remove(filename); err != nil {
+                return fmt.Errorf("remove expired event file: %w", err)
+            }
+
+            store.logger.Info("removed expired event file",
+                zap.String("file", filename),
+            )
+        }
+    }
+
+    return nil
 }
 
-// flushBuffer writes buffered entries to file
-func (jfs *JSONFileStorage) flushBuffer() error {
-	if len(jfs.buffer) == 0 {
-		return nil
-	}
+func (store *JSONFileStorage) fileForWrite(
+    recordSize int,
+    now time.Time,
+) (string, error) {
+    weekStart := startOfWeek(now)
+    prefix := filepath.Join(
+        store.dataDir,
+        fmt.Sprintf("events_%s", weekStart.Format("20060102")),
+    )
 
-	// Group entries by service name
-	serviceGroups := make(map[string][]entities.LogEntry)
-	for _, entry := range jfs.buffer {
-		serviceGroups[entry.ServiceName] = append(serviceGroups[entry.ServiceName], entry)
-	}
+    for index := 0; ; index++ {
+        filename := fmt.Sprintf("%s_%02d.jsonl", prefix, index)
 
-	// Write each service group to its file
-	for serviceName, entries := range serviceGroups {
-		filename := jfs.getFilename(serviceName)
+        info, err := os.Stat(filename)
+        if err != nil {
+            if os.IsNotExist(err) {
+                return filename, nil
+            }
+            return "", err
+        }
 
-		// Read existing entries
-		existingEntries, err := jfs.readFile(filename)
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-
-		// Append new entries
-		allEntries := append(existingEntries, entries...)
-
-		// Write back to file
-		if err := jfs.writeFile(filename, allEntries); err != nil {
-			return err
-		}
-	}
-
-	// Clear buffer
-	jfs.buffer = jfs.buffer[:0]
-
-	return nil
+        if info.Size()+int64(recordSize) <= store.maxFileSize {
+            return filename, nil
+        }
+    }
 }
 
-// getFilename generates filename for a service
-func (jfs *JSONFileStorage) getFilename(serviceName string) string {
-	// Get end of week date (Sunday)
-	now := time.Now()
-	daysUntilSunday := int(time.Sunday - now.Weekday())
-	if daysUntilSunday == 0 {
-		daysUntilSunday = 7
-	}
-	endOfWeek := now.AddDate(0, 0, daysUntilSunday)
+func (store *JSONFileStorage) loadEventIDs() error {
+    files, err := store.eventFiles()
+    if err != nil {
+        return err
+    }
 
-	dateStr := endOfWeek.Format("010206") // MM/DD/YY format
-	return filepath.Join(jfs.dataDir, fmt.Sprintf("%s_%s.json", serviceName, dateStr))
+    for _, filename := range files {
+        events, err := readEvents(filename)
+        if err != nil {
+            return err
+        }
+
+        for _, event := range events {
+            if event.EventID != "" {
+                store.knownIDs[event.EventID] = struct{}{}
+            }
+        }
+    }
+
+    return nil
 }
 
-// getServiceFiles returns all files for a service
-func (jfs *JSONFileStorage) getServiceFiles(serviceName string) ([]string, error) {
-	var files []string
+func (store *JSONFileStorage) eventFiles() ([]string, error) {
+    matches, err := filepath.Glob(
+        filepath.Join(store.dataDir, "events_*.jsonl"),
+    )
+    if err != nil {
+        return nil, err
+    }
 
-	err := filepath.WalkDir(jfs.dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !d.IsDir() && strings.HasSuffix(path, ".json") {
-			filename := filepath.Base(path)
-			if strings.HasPrefix(filename, serviceName+"_") {
-				files = append(files, path)
-			}
-		}
-
-		return nil
-	})
-
-	return files, err
+    sort.Strings(matches)
+    return matches, nil
 }
 
-// readFile reads entries from a JSON file
-func (jfs *JSONFileStorage) readFile(filename string) ([]entities.LogEntry, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, err
-	}
+func readEvents(filename string) ([]contracts.Event, error) {
+    file, err := os.Open(filename)
+    if err != nil {
+        return nil, fmt.Errorf("open event file: %w", err)
+    }
+    defer file.Close()
 
-	if len(data) == 0 {
-		return []entities.LogEntry{}, nil
-	}
+    events := make([]contracts.Event, 0)
+    scanner := bufio.NewScanner(file)
 
-	var entries []entities.LogEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, err
-	}
+    // Permit records larger than Scanner's default 64 KiB limit.
+    scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
-	return entries, nil
+    for scanner.Scan() {
+        line := scanner.Bytes()
+        if len(line) == 0 {
+            continue
+        }
+
+        var event contracts.Event
+        if err := json.Unmarshal(line, &event); err != nil {
+            return nil, fmt.Errorf(
+                "decode event in %s: %w",
+                filename,
+                err,
+            )
+        }
+
+        events = append(events, event)
+    }
+
+    if err := scanner.Err(); err != nil {
+        return nil, fmt.Errorf("read event file: %w", err)
+    }
+
+    return events, nil
 }
 
-// writeFile writes entries to a JSON file
-func (jfs *JSONFileStorage) writeFile(filename string, entries []entities.LogEntry) error {
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
+func startOfWeek(value time.Time) time.Time {
+    value = value.UTC()
 
-	// Create directory if it doesn't exist
-	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(filename, data, 0644)
+    // Monday is the start of the storage week.
+    daysSinceMonday := (int(value.Weekday()) + 6) % 7
+    return value.AddDate(0, 0, -daysSinceMonday).
+        Truncate(24 * time.Hour)
 }
 
-// startBackgroundTasks starts background tasks like rotation
-func (jfs *JSONFileStorage) startBackgroundTasks() {
-	ticker := time.NewTicker(1 * time.Hour)
-	defer ticker.Stop()
+func matchesFilter(
+    event contracts.Event,
+    filter contracts.EventFilter,
+) bool {
+    if len(filter.Levels) > 0 &&
+        !containsLevel(filter.Levels, event.Level) {
+        return false
+    }
 
-	for range ticker.C {
-		if err := jfs.RotateLogs(context.Background()); err != nil {
-			jfs.logger.Error("Failed to rotate logs", zap.Error(err))
-		}
-	}
+    if len(filter.Services) > 0 &&
+        !containsString(filter.Services, event.Service) {
+        return false
+    }
+
+    if len(filter.EventTypes) > 0 &&
+        !containsString(filter.EventTypes, event.EventType) {
+        return false
+    }
+
+    return true
 }
+
+func containsLevel(
+    values []contracts.EventLevel,
+    target contracts.EventLevel,
+) bool {
+    for _, value := range values {
+        if value == target {
+            return true
+        }
+    }
+
+    return false
+}
+
+func containsString(values []string, target string) bool {
+    for _, value := range values {
+        if value == target {
+            return true
+        }
+    }
+
+    return false
+}
+
+// Compile-time contract check.
+var _ interface {
+    Store(context.Context, contracts.Event) error
+    Get(context.Context, string) (contracts.Event, error)
+    Query(context.Context, contracts.EventFilter) ([]contracts.Event, error)
+    Health(context.Context) error
+    Close() error
+} = (*JSONFileStorage)(nil)
+
+// Keep io imported available for compatibility with older callers that may
+// use this file while migrating from array-based JSON storage.
+var _ = io.EOF
