@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/gorilla/websocket"
 	"github.com/hftamayo/gologger/internal/contracts"
 	"github.com/hftamayo/gologger/internal/ports"
 )
@@ -109,6 +110,12 @@ func (handler *EventHandler) Submit(
 	}
 }
 
+func (handler *EventHandler) Subscribe(
+    filter contracts.EventFilter,
+) ports.EventSubscription {
+    return handler.publisher.Subscribe(filter)
+}
+
 func (handler *EventHandler) worker() {
     defer handler.wg.Done()
 
@@ -126,6 +133,23 @@ func (handler *EventHandler) worker() {
             Err:   err,
         }
         close(job.ack)
+    }
+}
+
+func (handler *EventHandler) handleMonitor(
+    connection *websocket.Conn,
+    message *contracts.SubscribeMessage,
+) {
+    subscription := handler.Subscribe(message.Filters)
+    defer subscription.Close()
+
+    for event := range subscription.Events() {
+        if err := connection.WriteJSON(contracts.EventMessage{
+            Type:  contracts.MessageTypeEvent,
+            Event: event,
+        }); err != nil {
+            return
+        }
     }
 }
 
