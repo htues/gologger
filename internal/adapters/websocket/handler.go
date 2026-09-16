@@ -19,15 +19,16 @@ var (
 // submit work through Submit; workers process and persist admitted events, and
 // Shutdown drains admitted work before returning.
 type EventHandler struct {
-	processor ports.EventProcessor
-	store     ports.EventStore
+    processor ports.EventProcessor
+    store     ports.EventStore
+    publisher ports.EventPublisher
 
-	jobs chan eventJob
-	wg   sync.WaitGroup
+    jobs chan eventJob
+    wg   sync.WaitGroup
 
-	 admissionMu sync.Mutex
-	accepting atomic.Bool
-	stopOnce  sync.Once
+    admissionMu sync.Mutex
+    accepting   atomic.Bool
+    stopOnce    sync.Once
 }
 
 type eventJob struct {
@@ -65,6 +66,7 @@ func NewEventHandler(
 	handler := &EventHandler{
 		processor: processor,
 		store:     store,
+		publisher: newEventPublisher(32),
 		jobs:      make(chan eventJob, queueSize),
 	}
 	handler.accepting.Store(true)
@@ -108,17 +110,23 @@ func (handler *EventHandler) Submit(
 }
 
 func (handler *EventHandler) worker() {
-	defer handler.wg.Done()
+    defer handler.wg.Done()
 
-	for job := range handler.jobs {
-		processed, err := handler.processor.Process(job.ctx, job.event)
-		if err == nil {
-			err = handler.store.Store(job.ctx, processed)
-		}
+    for job := range handler.jobs {
+        processed, err := handler.processor.Process(job.ctx, job.event)
+        if err == nil {
+            err = handler.store.Store(job.ctx, processed)
+        }
+        if err == nil {
+            handler.publisher.Publish(processed)
+        }
 
-		job.ack <- EventResult{Event: processed, Err: err}
-		close(job.ack)
-	}
+        job.ack <- EventResult{
+            Event: processed,
+            Err:   err,
+        }
+        close(job.ack)
+    }
 }
 
 // Shutdown stops admission, drains queued events until the context expires,
