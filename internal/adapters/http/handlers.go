@@ -3,8 +3,10 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"expvar"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -20,18 +22,54 @@ const (
 	applicationJSON            = "application/json"
 )
 
+type Metrics struct {
+    receivedLogs  atomic.Int64
+    storedLogs    atomic.Int64
+    failedLogs    atomic.Int64
+}
+
 // Handler handles HTTP requests for the logger service
 type Handler struct {
 	loggerService ports.LoggerService
+	store         ports.EventStore
 	logger        *zap.Logger
+	metrics       *Metrics
 }
 
+func newMetrics() *Metrics {
+    return &Metrics{}
+}
+
+func (metrics *Metrics) publish() {
+    expvar.Publish("gologger_logs_received", expvar.Func(func() any {
+        return metrics.receivedLogs.Load()
+    }))
+
+    expvar.Publish("gologger_logs_stored", expvar.Func(func() any {
+        return metrics.storedLogs.Load()
+    }))
+
+    expvar.Publish("gologger_logs_failed", expvar.Func(func() any {
+        return metrics.failedLogs.Load()
+    }))
+}
+
+
 // NewHandler creates a new HTTP handler
-func NewHandler(loggerService ports.LoggerService, logger *zap.Logger) *Handler {
-	return &Handler{
-		loggerService: loggerService,
-		logger:        logger,
-	}
+func NewHandler(
+    loggerService ports.LoggerService,
+    store ports.EventStore,
+    logger *zap.Logger,
+) *Handler {
+    metrics := newMetrics()
+    metrics.publish()
+
+    return &Handler{
+        loggerService: loggerService,
+        store:         store,
+        logger:        logger,
+        metrics:       metrics,
+    }
 }
 
 // LogEntryRequest represents the request body for logging an entry
@@ -58,22 +96,30 @@ type GetLogsRequest struct {
 
 // RegisterRoutes registers all HTTP routes
 func (h *Handler) RegisterRoutes(router *mux.Router) {
-	router.HandleFunc("/logs", h.LogEntry).Methods("POST")
-	router.HandleFunc("/logs", h.GetLogs).Methods("GET")
-	router.HandleFunc("/logs/stream", h.StreamLogs).Methods("GET")
-	router.HandleFunc("/services", h.GetServices).Methods("GET")
-	router.HandleFunc("/stats", h.GetStats).Methods("GET")
-	router.HandleFunc("/health", h.HealthCheck).Methods("GET")
+    router.HandleFunc("/logs", h.LogEntry).Methods("POST")
+    router.HandleFunc("/logs", h.GetLogs).Methods("GET")
+    router.HandleFunc("/logs/stream", h.StreamLogs).Methods("GET")
+    router.HandleFunc("/services", h.GetServices).Methods("GET")
+    router.HandleFunc("/stats", h.GetStats).Methods("GET")
+
+    router.HandleFunc("/health", h.HealthCheck).Methods("GET")
+    router.HandleFunc("/health/live", h.LivenessCheck).Methods("GET")
+    router.HandleFunc("/health/ready", h.ReadinessCheck).Methods("GET")
+    router.HandleFunc("/metrics", h.Metrics).Methods("GET")
 }
 
 // LogEntry handles POST /logs
 func (h *Handler) LogEntry(w http.ResponseWriter, r *http.Request) {
-	var req LogEntryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.logger.Error("Failed to decode request body", zap.Error(err))
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
+    h.metrics.receivedLogs.Add(1)
+
+    var req LogEntryRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        h.metrics.failedLogs.Add(1)
+
+        h.logger.Error("Failed to decode request body", zap.Error(err))
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
 
 	// Validate required fields
 	if req.ServiceName == "" {
@@ -98,6 +144,16 @@ func (h *Handler) LogEntry(w http.ResponseWriter, r *http.Request) {
 	if req.EventTimestamp != nil {
 		entry.EventTimestamp = *req.EventTimestamp
 	}
+
+   if err := h.loggerService.LogEntry(r.Context(), entry); err != nil {
+        h.metrics.failedLogs.Add(1)
+
+        h.logger.Error("Failed to store log entry", zap.Error(err))
+        http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
+        return
+    }
+
+    h.metrics.storedLogs.Add(1)	
 
 	// Store the log entry
 	ctx := r.Context()
@@ -259,4 +315,46 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 		"timestamp": time.Now(),
 		"service":   "logger-service",
 	})
+}
+
+// LivenessCheck handles GET /health/live
+func (h *Handler) LivenessCheck(w http.ResponseWriter, r *http.Request) {
+    h.writeJSON(w, http.StatusOK, map[string]any{
+        "status":    "alive",
+        "timestamp": time.Now().UTC(),
+    })
+}
+
+func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
+    if err := h.store.Health(r.Context()); err != nil {
+        h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+            "status": "not_ready",
+            "error":  "storage unavailable",
+        })
+        return
+    }
+
+    h.writeJSON(w, http.StatusOK, map[string]any{
+        "status":    "ready",
+        "timestamp": time.Now().UTC(),
+    })
+}
+
+func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+    h.LivenessCheck(w, r)
+}
+
+func (h *Handler) Metrics(w http.ResponseWriter, r *http.Request) {
+    expvar.Handler().ServeHTTP(w, r)
+}
+
+func (h *Handler) writeJSON(
+    w http.ResponseWriter,
+    status int,
+    value any,
+) {
+    w.Header().Set(contentTypeHeader, applicationJSON)
+    w.WriteHeader(status)
+
+    _ = json.NewEncoder(w).Encode(value)
 }

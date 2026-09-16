@@ -54,7 +54,11 @@ func main() {
 	loggerService := services.NewLoggerService(storageAdapter, logger, &cfg.Logging.Level)
 
 	// Initialize HTTP handler
-	handler := http.NewHandler(loggerService, logger)
+	handler := http.NewHandler(
+    loggerService,
+    storageAdapter,
+    logger,
+)
 
 	// Setup router
 	router := mux.NewRouter()
