@@ -14,6 +14,12 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	internalServerErrorMessage = "Internal server error"
+	contentTypeHeader          = "Content-Type"
+	applicationJSON            = "application/json"
+)
+
 // Handler handles HTTP requests for the logger service
 type Handler struct {
 	loggerService ports.LoggerService
@@ -97,7 +103,7 @@ func (h *Handler) LogEntry(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if err := h.loggerService.LogEntry(ctx, entry); err != nil {
 		h.logger.Error("Failed to store log entry", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
@@ -108,7 +114,7 @@ func (h *Handler) LogEntry(w http.ResponseWriter, r *http.Request) {
 		Status:    "success",
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, applicationJSON)
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(response)
 }
@@ -137,12 +143,12 @@ func (h *Handler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	logs, err := h.loggerService.GetLogs(ctx, serviceName, level, limit)
 	if err != nil {
 		h.logger.Error("Failed to get logs", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
 	// Return response
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, applicationJSON)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"logs":  logs,
 		"count": len(logs),
@@ -218,11 +224,11 @@ func (h *Handler) GetServices(w http.ResponseWriter, r *http.Request) {
 	services, err := h.loggerService.GetServiceNames(ctx)
 	if err != nil {
 		h.logger.Error("Failed to get service names", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, applicationJSON)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"services": services,
 		"count":    len(services),
@@ -237,17 +243,17 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.loggerService.GetLogStats(ctx, serviceName)
 	if err != nil {
 		h.logger.Error("Failed to get log stats", zap.Error(err))
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		http.Error(w, internalServerErrorMessage, http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, applicationJSON)
 	json.NewEncoder(w).Encode(stats)
 }
 
 // HealthCheck handles GET /health
 func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentTypeHeader, applicationJSON)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "healthy",
 		"timestamp": time.Now(),
