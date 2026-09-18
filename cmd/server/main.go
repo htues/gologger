@@ -43,7 +43,6 @@ func main() {
 		cfg.Storage.DataDir,
 		cfg.Storage.RotationDays,
 		cfg.Storage.MaxFileSize,
-		cfg.Storage.BufferSize,
 		logger,
 	)
 	if err != nil {

@@ -302,9 +302,9 @@ curl http://localhost:8080/health
   trusted.
 - Allow inbound traffic only from approved producer subnets, gateway security
   groups, or Kubernetes namespaces. Deny all other inbound traffic.
-- Persist `/app/logs` on durable storage when using JSON storage. For multiple
-  replicas, prefer a shared storage adapter such as Redis or another centralized
-  event store instead of independent local files.
+- Persist `/app/logs` on durable storage when using the current JSON storage
+  backend. Keep one writer instance per data directory; do not mount the same
+  JSON directory into multiple replicas.
 - Configure gateway request limits separately from the service limits. The
   gateway protects the fleet; the service protects its own CPU, memory, storage,
   and WebSocket capacity.
@@ -321,10 +321,14 @@ Go / Node.js / Spring Boot producers
                 v
        Logger service replicas
        local body and connection limits
-                |
-                v
-      Redis or centralized event storage
+                    |
+                    v
+               Durable volume with JSONL files
 ```
+
+            JSON files are the selected storage backend for the current deployment. Redis
+            Streams or another centralized event store remains a future scale-out option;
+            it is not required for a single logger-service instance.
 
 ### Secrets
 
@@ -439,9 +443,10 @@ allows ingress only from the producer namespace or internal gateway. Configure
 the ingress controller with TLS, authentication, request-size limits, and a
 distributed rate limiter before traffic reaches the replicas.
 
-The in-process limiter does not coordinate the three replicas in this example.
-Use gateway-level limits for the global policy and a shared Redis-backed limiter
-when per-client limits must be consistent across replicas.
+The in-process limiter does not coordinate multiple replicas. Because JSON
+storage is currently single-writer, deploy one logger-service instance per JSON
+data directory. If horizontal scaling becomes necessary, add a centralized
+storage adapter and shared rate limiter before increasing the replica count.
 
 ## Monitoring
 
