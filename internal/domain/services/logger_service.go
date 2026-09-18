@@ -7,6 +7,7 @@ import (
 
 	"github.com/hftamayo/gologger/internal/domain/entities"
 	"github.com/hftamayo/gologger/internal/ports"
+	"github.com/hftamayo/gologger/internal/security"
 	"go.uber.org/zap"
 )
 
@@ -31,6 +32,8 @@ func NewLoggerService(storage ports.StorageRepository, logger *zap.Logger, confi
 
 // LogEntry adds a single log entry to the system
 func (ls *LoggerServiceImpl) LogEntry(ctx context.Context, entry entities.LogEntry) error {
+	entry.Data = security.RedactLogData(entry.Data)
+
 	// Validate the log entry
 	if !entry.IsValid() {
 		ls.logger.Error("Invalid log entry received", zap.String("serviceName", entry.ServiceName))

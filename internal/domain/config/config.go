@@ -16,11 +16,13 @@ type Config struct {
 
 // ServerConfig holds server-related configuration
 type ServerConfig struct {
-	Port         string        `mapstructure:"port"`
-	Host         string        `mapstructure:"host"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+	Port           string        `mapstructure:"port"`
+	Host           string        `mapstructure:"host"`
+	ReadTimeout    time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout   time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout    time.Duration `mapstructure:"idle_timeout"`
+	MaxBodyBytes   int64         `mapstructure:"max_body_bytes"`
+	MaxConnections int           `mapstructure:"max_connections"`
 }
 
 // StorageConfig holds storage-related configuration
@@ -49,11 +51,13 @@ type RateLimitConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Port:         "8080",
-			Host:         "0.0.0.0",
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
-			IdleTimeout:  60 * time.Second,
+			Port:           "8080",
+			Host:           "0.0.0.0",
+			ReadTimeout:    15 * time.Second,
+			WriteTimeout:   15 * time.Second,
+			IdleTimeout:    60 * time.Second,
+			MaxBodyBytes:   1 << 20,
+			MaxConnections: 100,
 		},
 		Storage: StorageConfig{
 			DataDir:      "./logs",

@@ -14,6 +14,7 @@ import (
 	"github.com/hftamayo/gologger/internal/adapters/http"
 	"github.com/hftamayo/gologger/internal/adapters/storage"
 	"github.com/hftamayo/gologger/internal/domain/services"
+	"github.com/hftamayo/gologger/internal/security"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -55,10 +56,11 @@ func main() {
 
 	// Initialize HTTP handler
 	handler := http.NewHandler(
-    loggerService,
-    storageAdapter,
-    logger,
-)
+		loggerService,
+		storageAdapter,
+		logger,
+	)
+	handler.SetConnectionLimiter(security.NewConnectionLimiter(cfg.Server.MaxConnections))
 
 	// Setup router
 	router := mux.NewRouter()
@@ -72,9 +74,18 @@ func main() {
 	})
 
 	// Create server
+	var protectedHandler http.Handler = corsMiddleware.Handler(http.MaxBytesHandler(router, cfg.Server.MaxBodyBytes))
+	if cfg.RateLimit.Enabled {
+		protectedHandler = security.Middleware(
+			security.NewFixedWindowLimiter(cfg.RateLimit.RequestsPer, cfg.RateLimit.Window),
+			security.ClientKey,
+			protectedHandler,
+		)
+	}
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port),
-		Handler:      corsMiddleware.Handler(router),
+		Handler:      protectedHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,

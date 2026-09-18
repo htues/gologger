@@ -23,6 +23,8 @@ func NewViperConfigLoader() *ViperConfigLoader {
 	v.SetDefault("server.read_timeout", "15s")
 	v.SetDefault("server.write_timeout", "15s")
 	v.SetDefault("server.idle_timeout", "60s")
+	v.SetDefault("server.max_body_bytes", 1048576)
+	v.SetDefault("server.max_connections", 100)
 
 	v.SetDefault("storage.data_dir", "./logs")
 	v.SetDefault("storage.rotation_days", 7)
