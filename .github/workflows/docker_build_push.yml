@@ -1,0 +1,57 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_run:
+    workflows:
+    - CI
+    types:
+    - completed
+    branches:
+    - main
+    # Note: paths are not supported for workflow_run trigger
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_HUB_EMAIL }}
+        password: ${{ secrets.DOCKER_HUB_PAT }}
+
+    - name: Set image tag
+      run: echo "IMAGE_TAG=$(echo ${{ github.event.workflow_run.head_sha }} | cut -c1-7)" >> "$GITHUB_ENV"
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: |
+          hftamayo/gologger:${{ env.IMAGE_TAG }}
+          hftamayo/gologger:loggerdev
+
+    - name: Notify Slack on successful image push
+      continue-on-error: true
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        REPOSITORY: hftamayo/gologger
+        COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+        IMAGE_TAG: ${{ env.IMAGE_TAG }}
+      run: |
+        payload=$(printf '{"text":"Gologger `%s:%s` was built and pushed successfully from commit `%s`."}' \
+          "$REPOSITORY" \
+          "$IMAGE_TAG" \
+          "${COMMIT_SHA:0:7}")
+        curl -fsSL -X POST \
+          -H 'Content-type: application/json' \
+          --data "$payload" \
+          "$SLACK_WEBHOOK_URL"
