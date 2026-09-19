@@ -226,70 +226,103 @@ func (h *Handler) GetLogs(w http.ResponseWriter, r *http.Request) {
 
 // StreamLogs handles GET /logs/stream (WebSocket)
 func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
-	if h.connectionLimiter != nil {
-		if !h.connectionLimiter.TryAcquire() {
-			http.Error(w, "connection limit reached", http.StatusServiceUnavailable)
-			return
-		}
-		defer h.connectionLimiter.Release()
-	}
+    if !h.tryAcquireConnection(w) {
+        return
+    }
+    defer h.releaseConnection()
 
-	serviceName := r.URL.Query().Get("serviceName")
-	levelStr := r.URL.Query().Get("level")
+    serviceName := r.URL.Query().Get("serviceName")
+    level := entities.LogLevel(r.URL.Query().Get("level"))
 
-	var level entities.LogLevel
-	if levelStr != "" {
-		level = entities.LogLevel(levelStr)
-	}
+    conn, err := h.upgradeWebSocket(w, r)
+    if err != nil {
+        h.logWebSocketError(err)
+        return
+    }
+    defer conn.Close()
 
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
+    ctx, cancel := context.WithCancel(r.Context())
+    defer cancel()
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		if h.logger != nil {
-			h.logger.Error("Failed to upgrade to WebSocket", zap.Error(err))
-		}
-		return
-	}
-	defer conn.Close()
+    stream, err := h.loggerService.StreamLogs(ctx, serviceName, level)
+    if err != nil {
+        h.handleStreamStartError(conn, err)
+        return
+    }
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+    if err := conn.WriteJSON(map[string]string{"status": "connected"}); err != nil {
+        h.logWebSocketError(err)
+        return
+    }
 
-	stream, err := h.loggerService.StreamLogs(ctx, serviceName, level)
-	if err != nil {
-		if h.logger != nil {
-			h.logger.Error("Failed to start log stream", zap.Error(err))
-		}
-		_ = conn.WriteJSON(map[string]string{"error": "Failed to start stream"})
-		return
-	}
+    h.forwardStream(conn, stream, ctx)
+}
 
-	_ = conn.WriteJSON(map[string]string{"status": "connected"})
+func (h *Handler) tryAcquireConnection(w http.ResponseWriter) bool {
+    if h.connectionLimiter == nil {
+        return true
+    }
 
-	for {
-		select {
-		case entry, ok := <-stream:
-			if !ok {
-				_ = conn.WriteJSON(map[string]string{"status": "disconnected"})
-				return
-			}
+    if !h.connectionLimiter.TryAcquire() {
+        http.Error(w, "connection limit reached", http.StatusServiceUnavailable)
+        return false
+    }
 
-			if err := conn.WriteJSON(entry); err != nil {
-				if h.logger != nil {
-					h.logger.Error("Failed to send log entry via WebSocket", zap.Error(err))
-				}
-				return
-			}
+    return true
+}
 
-		case <-ctx.Done():
-			return
-		}
-	}
+func (h *Handler) releaseConnection() {
+    if h.connectionLimiter != nil {
+        h.connectionLimiter.Release()
+    }
+}
+
+func (h *Handler) upgradeWebSocket(
+    w http.ResponseWriter,
+    r *http.Request,
+) (*websocket.Conn, error) {
+    upgrader := websocket.Upgrader{
+        CheckOrigin: func(r *http.Request) bool {
+            return true
+        },
+    }
+
+    return upgrader.Upgrade(w, r, nil)
+}
+
+func (h *Handler) handleStreamStartError(conn *websocket.Conn, err error) {
+    h.logWebSocketError(err)
+    _ = conn.WriteJSON(map[string]string{"error": "Failed to start stream"})
+}
+
+func (h *Handler) forwardStream(
+    conn *websocket.Conn,
+    stream <-chan entities.LogEntry,
+    ctx context.Context,
+) {
+    for {
+        select {
+        case entry, ok := <-stream:
+            if !ok {
+                _ = conn.WriteJSON(map[string]string{"status": "disconnected"})
+                return
+            }
+
+            if err := conn.WriteJSON(entry); err != nil {
+                h.logWebSocketError(err)
+                return
+            }
+
+        case <-ctx.Done():
+            return
+        }
+    }
+}
+
+func (h *Handler) logWebSocketError(err error) {
+    if h.logger != nil {
+        h.logger.Error("WebSocket stream error", zap.Error(err))
+    }
 }
 
 // GetServices handles GET /services
