@@ -208,10 +208,10 @@ func TestNewConnectionUsesDefaultQueueSize(t *testing.T) {
 
 	connection := newConnection(handler, nil)
 
-	if cap(connection.send) != defaultWriteQueue {
+	if cap(connection.outbound) != defaultWriteQueue {
 		t.Fatalf(
 			"queue capacity = %d, want %d",
-			cap(connection.send),
+			cap(connection.outbound),
 			defaultWriteQueue,
 		)
 	}
