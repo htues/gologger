@@ -1,356 +1,445 @@
 # Logger Service
 
-A microservice-based logging system built with Go using hexagonal architecture. This service provides centralized logging capabilities for multiple applications and services.
+A centralized event logging service built with Go. The service receives structured
+application events over WebSocket, validates and sanitizes them, and persists them
+as JSON Lines files.
+
+The current implementation uses a single canonical event model:
+
+```text
+contracts.Event
+        ↓
+security.RedactEvent
+        ↓
+services.EventProcessorService
+        ↓
+ports.EventStore
+        ↓
+storage.JSONFileStorage
+```
+
+Legacy `LogEntry`-based HTTP logging has been removed in favor of the event
+pipeline.
 
 ## Features
 
-- **Structured Logging**: JSON-based log format with configurable levels
-- **Service Isolation**: Separate log files per service with weekly rotation
-- **Real-time Streaming**: WebSocket support for live log monitoring
-- **RESTful API**: HTTP endpoints for log ingestion and retrieval
-- **Buffered Storage**: Asynchronous, non-blocking log storage
-- **Configurable**: Environment-based configuration with hot reload support
-- **Containerized**: Docker support for easy deployment
+- **Canonical event model**: all ingestion, validation, storage, and publication
+  use `contracts.Event`.
+- **WebSocket producer protocol**: producers connect to `/ws/events`, perform a
+  hello handshake, and submit event messages.
+- **Structured JSON event storage**: accepted events are persisted as JSON Lines.
+- **Validation and normalization**: event levels, required fields, timestamps, and
+  metadata are validated before storage.
+- **Sensitive data protection**: messages, event fields, context, and metadata are
+  sanitized/redacted before validation and persistence.
+- **Local JSONL storage backend**: events are stored in weekly rotated JSONL files.
+- **Health endpoints**: liveness and readiness endpoints are available for
+  deployment platforms.
+- **Rate limiting**: process-local fixed-window rate limiting protects HTTP/WebSocket
+  entrypoints.
+- **Configurable runtime**: configuration is loaded through Viper from defaults and
+  environment variables.
 
 ## Architecture
 
-This service follows hexagonal architecture principles:
+This service follows a simplified hexagonal architecture centered on the event
+pipeline.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Application Layer                        │
-├─────────────────────────────────────────────────────────────┤
-│  HTTP Adapter  │  WebSocket Adapter  │  Config Adapter     │
-├─────────────────────────────────────────────────────────────┤
-│                    Domain Layer                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   Entities  │  │   Services  │  │   Ports     │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘        │
-├─────────────────────────────────────────────────────────────┤
-│                    Infrastructure Layer                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │JSON Storage │  │HTTP Handler │  │Viper Config │        │
-│  └─────────────┘  └─────────────┘  └─────────────┘        │
+│                                                             │
+│  cmd/server                                                │
+│  WebSocket endpoint: /ws/events                            │
+│  Health endpoints: /health, /health/live, /health/ready    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              v
+┌─────────────────────────────────────────────────────────────┐
+│                    WebSocket Adapter                        │
+│                                                             │
+│  internal/websockets                                       │
+│  - authenticates API key                                   │
+│  - validates origin policy                                 │
+│  - performs protocol handshake                             │
+│  - reads event messages                                    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              v
+┌─────────────────────────────────────────────────────────────┐
+│                    Domain Services                          │
+│                                                             │
+│  internal/domain/services                                  │
+│  - redacts sensitive values                                │
+│  - validates event shape                                   │
+│  - maps compatibility levels                               │
+│  - normalizes timestamps and text                          │
+│  - generates event IDs                                     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              v
+┌─────────────────────────────────────────────────────────────┐
+│                    Ports                                    │
+│                                                             │
+│  internal/ports                                             │
+│  - EventProcessor                                          │
+│  - EventStore                                              │
+│  - EventPublisher                                          │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              v
+┌─────────────────────────────────────────────────────────────┐
+│                    Storage Adapter                          │
+│                                                             │
+│  internal/adapters/storage                                 │
+│  - JSONFileStorage                                         │
+│  - JSON Lines persistence                                  │
+│  - duplicate event detection                               │
+│  - query support                                           │
+│  - health checks                                           │
+│  - retention rotation                                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## API Endpoints
+## Current Package Layout
 
-### POST /logs
+```text
+cmd/server
+  Application bootstrap and HTTP server setup.
 
-Log a new entry.
+internal/contracts
+  Canonical event and WebSocket protocol contracts.
 
-**Request Body:**
+internal/domain/config
+  Runtime configuration structures.
+
+internal/domain/services
+  Event processing: validation, normalization, enrichment, redaction integration.
+
+internal/ports
+  Event-oriented interfaces:
+  - EventProcessor
+  - EventStore
+  - EventPublisher
+
+internal/adapters/config
+  Viper-based configuration loader.
+
+internal/adapters/storage
+  JSON Lines event storage implementation.
+
+internal/adapters/websocket
+  Bounded event handler, publisher, subscriptions, and queue processing.
+
+internal/security
+  Redaction, rate limiting, and connection limiting utilities.
+
+internal/websockets
+  WebSocket protocol handler and hub support.
+```
+
+## Event Model
+
+The canonical event type is `contracts.Event`.
 
 ```json
 {
-  "event_timestamp": "2024-01-15T10:30:00Z",
+  "eventId": "evt-123",
+  "timestamp": "2026-09-20T12:30:00Z",
   "level": "info",
-  "serviceName": "user-service",
-  "data": {
-    "code": "USER_CREATED",
-    "message": "User created successfully",
+  "service": "orders",
+  "component": "checkout-api",
+  "eventType": "order.created",
+  "message": "Order created successfully",
+  "code": "ORDER_CREATED",
+  "sessionId": "session-123",
+  "userId": "user-456",
+  "correlationId": "corr-789",
+  "traceId": "trace-abc",
+  "spanId": "span-def",
+  "context": {
+    "path": "/orders",
+    "method": "POST"
+  },
+  "metadata": {
+    "orderId": "order-123"
+  }
+}
+```
+
+### Required Fields
+
+The event processor requires:
+
+- `level`
+- `service`
+- `eventType`
+- `message`
+
+### Supported Event Levels
+
+Canonical levels:
+
+- `trace`
+- `debug`
+- `info`
+- `warn`
+- `error`
+- `fatal`
+
+Compatibility mappings:
+
+- `information` → `info`
+- `warning` → `warn`
+
+Unsupported levels are rejected.
+
+## Sensitive Data Redaction
+
+Before validation and persistence, events pass through redaction.
+
+The redactor sanitizes:
+
+- `service`
+- `component`
+- `eventType`
+- `message`
+- `code`
+- `sessionId`
+- `userId`
+- `correlationId`
+- `traceId`
+- `spanId`
+- `context`
+- `metadata`
+
+Sensitive patterns such as tokens, bearer credentials, passwords, secrets, API keys,
+authorization headers, cookies, and credentials are redacted.
+
+Example:
+
+```json
+{
+  "message": "request failed token=abc123"
+}
+```
+
+is persisted as:
+
+```json
+{
+  "message": "request failed [REDACTED]"
+}
+```
+
+Sensitive keys in `context` or `metadata` are replaced with:
+
+```text
+[REDACTED]
+```
+
+## WebSocket API
+
+### Endpoint
+
+```text
+GET /ws/events
+```
+
+Producer clients connect using WebSocket.
+
+If `LOGGER_API_KEY` is configured, clients must send:
+
+```text
+X-API-Key: <api-key>
+```
+
+When `LOGGER_API_KEY` is empty, localhost access can be allowed for local
+development.
+
+### Producer Handshake
+
+After connecting, the first message must be a `hello` message.
+
+```json
+{
+  "type": "hello",
+  "mode": "producer",
+  "client": "orders-service",
+  "version": "1.0"
+}
+```
+
+The server responds with:
+
+```json
+{
+  "type": "ready",
+  "connectionId": "20260920T123000.000000000",
+  "mode": "producer",
+  "serverTime": "2026-09-20T12:30:00Z"
+}
+```
+
+### Submit Event
+
+After the handshake, producers send event messages.
+
+```json
+{
+  "type": "event",
+  "requestId": "request-1",
+  "event": {
+    "level": "info",
+    "service": "orders",
+    "component": "checkout-api",
+    "eventType": "order.created",
+    "message": "Order created successfully",
+    "code": "ORDER_CREATED",
+    "correlationId": "corr-123",
     "context": {
-      "userId": "12345",
-      "sessionId": "sess_abc123",
-      "endpoint": "/api/users",
-      "method": "POST",
-      "domain": "example.com"
+      "path": "/orders",
+      "method": "POST"
     },
-    "extra": {
-      "userEmail": "user@example.com"
+    "metadata": {
+      "orderId": "order-123"
     }
   }
 }
 ```
 
-**Response:**
+Successful response:
 
 ```json
 {
-  "id": "20240115103000_abc12345",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "status": "success"
+  "type": "ack",
+  "requestId": "request-1",
+  "eventId": "evt-generated-or-provided",
+  "status": "accepted",
+  "timestamp": "2026-09-20T12:30:00Z"
 }
 ```
 
-### GET /logs
-
-Retrieve logs with optional filtering.
-
-**Query Parameters:**
-
-- `serviceName` (optional): Filter by service name
-- `level` (optional): Filter by log level
-- `limit` (optional): Maximum number of logs to return (default: 100)
-
-**Response:**
+Error response:
 
 ```json
 {
-  "logs": [...],
-  "count": 50
+  "type": "error",
+  "requestId": "request-1",
+  "code": "INVALID_MESSAGE",
+  "message": "message is invalid"
 }
 ```
 
-### GET /logs/stream
-
-WebSocket endpoint for real-time log streaming.
-
-**Query Parameters:**
-
-- `serviceName` (optional): Filter by service name
-- `level` (optional): Filter by log level
-
-### GET /services
-
-Get list of all services that have logged entries.
-
-**Response:**
-
-```json
-{
-  "services": ["user-service", "auth-service", "payment-service"],
-  "count": 3
-}
-```
-
-### GET /stats
-
-Get logging statistics.
-
-**Query Parameters:**
-
-- `serviceName` (optional): Get stats for specific service
-
-**Response:**
-
-```json
-{
-  "totalEntries": 1500,
-  "entriesByLevel": {
-    "info": 1000,
-    "error": 50,
-    "warn": 450
-  },
-  "entriesByService": {
-    "user-service": 800,
-    "auth-service": 700
-  }
-}
-```
+## Health Endpoints
 
 ### GET /health
 
-Health check endpoint.
-
-**Response:**
+Checks service health, including storage availability.
 
 ```json
 {
   "status": "healthy",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2026-09-20T12:30:00Z",
   "service": "logger-service"
 }
 ```
 
-## Configuration
+If storage is unavailable:
 
-The service is configured via environment variables:
-
-| Variable                  | Default     | Description                          |
-| ------------------------- | ----------- | ------------------------------------ |
-| `SERVER_PORT`             | `8080`      | HTTP server port                     |
-| `SERVER_HOST`             | `0.0.0.0`   | HTTP server host                     |
-| `SERVER_READ_TIMEOUT`     | `15s`       | Request read timeout                 |
-| `SERVER_WRITE_TIMEOUT`    | `15s`       | Response write timeout               |
-| `SERVER_IDLE_TIMEOUT`     | `60s`       | Connection idle timeout              |
-| `SERVER_MAX_BODY_BYTES`   | `1048576`   | Maximum accepted HTTP request body   |
-| `SERVER_MAX_CONNECTIONS`  | `100`       | Maximum concurrent WebSocket streams |
-| `STORAGE_DATA_DIR`        | `./logs`    | Directory for log files              |
-| `STORAGE_ROTATION_DAYS`   | `7`         | Days before log rotation             |
-| `STORAGE_MAX_FILE_SIZE`   | `104857600` | Max file size in bytes (100MB)       |
-| `STORAGE_BUFFER_SIZE`     | `1000`      | Buffer size for log entries          |
-| `LOGGING_LEVEL`           | `info`      | Global log level                     |
-| `LOGGING_FORMAT`          | `json`      | Log format                           |
-| `LOGGING_OUTPUT_PATH`     | `stdout`    | Log output path                      |
-| `RATE_LIMIT_ENABLED`      | `true`      | Enable rate limiting                 |
-| `RATE_LIMIT_REQUESTS_PER` | `1000`      | Requests per window                  |
-| `RATE_LIMIT_WINDOW`       | `1m`        | Rate limit window                    |
-
-For production, set these values explicitly rather than relying on defaults. The
-current service limiter is process-local. When running multiple replicas, enforce
-the global limit at the API gateway and use a shared Redis/token-bucket limiter if
-the service must share limits across instances.
-
-## Log Levels
-
-Supported log levels (in order of severity):
-
-- `trace` - Most verbose
-- `debug` - Debug information
-- `info` - General information
-- `warn` - Warnings
-- `error` - Errors
-- `fatal` - Fatal errors
-- `off` - Disable logging
-
-## File Storage
-
-Logs are stored in JSON files with the following naming convention:
-
-```
-{serviceName}_{MMDDYY}.json
+```json
+{
+  "status": "unhealthy",
+  "error": "storage unavailable"
+}
 ```
 
-Example: `user-service_011524.json`
+### GET /health/live
 
-Files are rotated weekly (on Sundays) and old files are automatically cleaned up based on the `STORAGE_ROTATION_DAYS` configuration.
+Liveness check.
 
-## Development
-
-### Prerequisites
-
-- Go 1.22.2 or later
-- Docker (optional)
-
-### Local Development
-
-1. Clone the repository:
-
-```bash
-git clone <repository-url>
-cd gologgermservice
+```json
+{
+  "status": "alive",
+  "timestamp": "2026-09-20T12:30:00Z"
+}
 ```
 
-2. Install dependencies:
+### GET /health/ready
 
-```bash
-go mod download
+Readiness check. Returns `200` when storage is available and `503` otherwise.
+
+```json
+{
+  "status": "ready",
+  "timestamp": "2026-09-20T12:30:00Z"
+}
 ```
 
-3. Run the service:
+## Removed Legacy Endpoints
 
-```bash
-go run cmd/server/main.go
-```
+The previous legacy `LogEntry` REST API has been removed from the current
+architecture.
 
-### Docker Development
-
-1. Build and run with Docker Compose:
-
-```bash
-docker-compose up --build
-```
-
-2. Or build and run manually:
-
-```bash
-docker build -t logger-service .
-docker run -p 8080:8080 -v $(pwd)/logs:/app/logs logger-service
-```
-
-## Testing
-
-### Manual Testing
-
-1. Start the service
-2. Send a test log entry:
-
-```bash
-curl -X POST http://localhost:8080/logs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "level": "info",
-    "serviceName": "test-service",
-    "data": {
-      "message": "Test log entry",
-      "context": {
-        "userId": "123",
-        "sessionId": "sess_456"
-      }
-    }
-  }'
-```
-
-3. Retrieve logs:
-
-```bash
-curl http://localhost:8080/logs?serviceName=test-service
-```
-
-4. Check health:
-
-```bash
-curl http://localhost:8080/health
-```
-
-## Production Deployment
-
-### Deployment Requirements
-
-- Run the service on a private network. Producers should reach it through an
-  internal load balancer, service mesh, or private Kubernetes Service.
-- Do not expose `/logs`, `/logs/stream`, `/services`, `/stats`, or `/metrics` to
-  the public internet. Expose health checks only through the platform health
-  mechanism or an authenticated internal route.
-- Enforce producer authentication, including `X-API-Key` validation, at the
-  private gateway or ingress. The current legacy HTTP adapter does not validate
-  API keys itself, so direct public access is not acceptable.
-- Terminate TLS at the gateway or ingress and forward traffic only over a trusted
-  private network. Use end-to-end TLS when the private network is not fully
-  trusted.
-- Allow inbound traffic only from approved producer subnets, gateway security
-  groups, or Kubernetes namespaces. Deny all other inbound traffic.
-- Persist `/app/logs` on durable storage when using the current JSON storage
-  backend. Keep one writer instance per data directory; do not mount the same
-  JSON directory into multiple replicas.
-- Configure gateway request limits separately from the service limits. The
-  gateway protects the fleet; the service protects its own CPU, memory, storage,
-  and WebSocket capacity.
-
-Recommended traffic flow:
+The following endpoints are no longer part of the service contract:
 
 ```text
-Go / Node.js / Spring Boot producers
-                |
-                v
-      Private API gateway / ingress
-      TLS, authentication, global rate limit
-                |
-                v
-       Logger service replicas
-       local body and connection limits
-                    |
-                    v
-               Durable volume with JSONL files
+POST /logs
+GET /logs
+GET /logs/stream
+GET /services
+GET /stats
 ```
 
-            JSON files are the selected storage backend for the current deployment. Redis
-            Streams or another centralized event store remains a future scale-out option;
-            it is not required for a single logger-service instance.
+Use the WebSocket event protocol at `/ws/events` instead.
 
-### Secrets
+## Storage
 
-The API key and any storage credentials are secrets. They must not be committed
-to Git, placed in Docker images, written to application logs, or passed as command
-line arguments. Supply them through a secret manager or runtime-injected
-environment variables.
+Events are persisted as JSON Lines files.
 
-Required practices:
+Current file naming pattern:
 
-- Generate a unique credential per producer or producer group.
-- Rotate credentials without rebuilding the image.
-- Grant only log-ingestion permissions to producer credentials; use separate
-  credentials for querying, administration, and storage.
-- Redact tokens, passwords, cookies, authorization headers, and API keys before
-  persistence or publication.
-- Keep secret values out of health responses, metrics labels, traces, and error
-  messages.
-- Restrict access to Kubernetes Secrets, Docker/Swarm secrets, or the selected
-  cloud secret manager using workload identity or an equivalent mechanism.
+```text
+events_{YYYYMMDD}_{NN}.jsonl
+```
 
-Example runtime configuration file for local deployment only:
+Example:
+
+```text
+events_20260914_00.jsonl
+```
+
+Files are grouped by the start of the storage week. When `STORAGE_MAX_FILE_SIZE`
+is exceeded, a new numbered file is created for the same week.
+
+Old files are removed by retention rotation according to `STORAGE_ROTATION_DAYS`.
+
+## Configuration
+
+The service is configured through environment variables.
+
+| Variable                  | Default      | Description                          |
+| ------------------------- | ------------ | ------------------------------------ |
+| `SERVER_PORT`             | `8080`       | HTTP server port                     |
+| `SERVER_HOST`             | `0.0.0.0`    | HTTP server host                     |
+| `SERVER_READ_TIMEOUT`     | `15s`        | Request read timeout                 |
+| `SERVER_WRITE_TIMEOUT`    | `15s`        | Response write timeout               |
+| `SERVER_IDLE_TIMEOUT`     | `60s`        | Connection idle timeout              |
+| `SERVER_MAX_BODY_BYTES`   | `1048576`    | Maximum accepted HTTP request body   |
+| `SERVER_MAX_CONNECTIONS`  | `100`        | Maximum concurrent connections       |
+| `STORAGE_DATA_DIR`        | `./logs`     | Directory for JSONL event files      |
+| `STORAGE_ROTATION_DAYS`   | `7`          | Days before event files expire       |
+| `STORAGE_MAX_FILE_SIZE`   | `104857600`  | Max event file size in bytes         |
+| `STORAGE_BUFFER_SIZE`     | `1000`       | Reserved buffer size setting         |
+| `LOGGING_LEVEL`           | `info`       | Service logging/event level setting  |
+| `LOGGING_FORMAT`          | `json`       | Log format                           |
+| `LOGGING_OUTPUT_PATH`     | `stdout`     | Log output path                      |
+| `RATE_LIMIT_ENABLED`      | `true`       | Enable process-local rate limiting   |
+| `RATE_LIMIT_REQUESTS_PER` | `1000`       | Requests per rate-limit window       |
+| `RATE_LIMIT_WINDOW`       | `1m`         | Rate-limit window                    |
+| `LOGGER_API_KEY`          | unset        | API key required for WebSocket usage |
+
+Example local configuration:
 
 ```dotenv
 SERVER_HOST=0.0.0.0
@@ -360,124 +449,202 @@ SERVER_MAX_CONNECTIONS=100
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_REQUESTS_PER=1000
 RATE_LIMIT_WINDOW=1m
-LOGGING_LEVEL=warn
+STORAGE_DATA_DIR=./logs
+STORAGE_ROTATION_DAYS=7
+STORAGE_MAX_FILE_SIZE=104857600
+LOGGER_API_KEY=local-development-key
 ```
 
-Do not commit this file when it contains credentials. In production, inject
-secrets separately from non-sensitive configuration.
+## Development
 
-### Docker Deployment
+### Prerequisites
 
-1. Build production image:
+- Go 1.24 or later
+- Docker, optional
+
+### Run Locally
+
+```bash
+go run cmd/server/main.go
+```
+
+### Run Tests
+
+```bash
+go test ./...
+```
+
+Useful focused test runs:
+
+```bash
+go test ./internal/security
+go test ./internal/domain/services
+go test ./internal/adapters/storage
+go test ./internal/websockets
+go test ./internal/adapters/websocket
+```
+
+## Manual WebSocket Test
+
+You can test with a WebSocket client such as `websocat`.
+
+Start the service:
+
+```bash
+LOGGER_API_KEY=local-development-key go run cmd/server/main.go
+```
+
+Connect:
+
+```bash
+websocat -H='X-API-Key: local-development-key' ws://localhost:8080/ws/events
+```
+
+Send hello:
+
+```json
+{
+  "type": "hello",
+  "mode": "producer",
+  "client": "manual-test",
+  "version": "1.0"
+}
+```
+
+Send event:
+
+```json
+{
+  "type": "event",
+  "requestId": "request-1",
+  "event": {
+    "level": "info",
+    "service": "manual-test",
+    "eventType": "manual.event",
+    "message": "manual event received",
+    "metadata": {
+      "source": "websocat"
+    }
+  }
+}
+```
+
+Expected response:
+
+```json
+{
+  "type": "ack",
+  "requestId": "request-1",
+  "eventId": "evt-generated-or-provided",
+  "status": "accepted",
+  "timestamp": "2026-09-20T12:30:00Z"
+}
+```
+
+## Production Deployment Notes
+
+- Run the service on a private network.
+- Require `LOGGER_API_KEY` or enforce equivalent authentication at a private
+  gateway.
+- Do not expose `/ws/events` publicly without authentication, TLS, and gateway-level
+  rate limiting.
+- Terminate TLS at the gateway or ingress unless the service is extended with native
+  TLS.
+- Persist `STORAGE_DATA_DIR` on durable storage.
+- Use one writer instance per JSONL data directory.
+- The built-in rate limiter is process-local. For multiple replicas, enforce global
+  rate limits at the gateway or replace it with a shared limiter.
+- JSONL storage is suitable for a single-instance deployment. For horizontal scale,
+  add a centralized event store before increasing writer replicas.
+
+Recommended traffic flow:
+
+```text
+Application producers
+        |
+        v
+Private gateway / ingress
+TLS, authentication, global rate limit
+        |
+        v
+Logger service
+WebSocket event ingestion
+        |
+        v
+JSONL event storage
+```
+
+## Docker
+
+Build:
 
 ```bash
 docker build -t logger-service:latest .
 ```
 
-2. Run with production configuration:
+Run:
 
 ```bash
 docker run -d \
   --name logger-service \
   -p 8080:8080 \
-  -v /var/log/logger-service:/app/logs \
-  -e LOGGING_LEVEL=warn \
-  -e SERVER_MAX_BODY_BYTES=1048576 \
-  -e SERVER_MAX_CONNECTIONS=100 \
+  -v "$(pwd)/logs:/app/logs" \
+  -e LOGGER_API_KEY=change-me \
+  -e STORAGE_DATA_DIR=/app/logs \
   -e RATE_LIMIT_ENABLED=true \
-  -e RATE_LIMIT_REQUESTS_PER=5000 \
+  -e RATE_LIMIT_REQUESTS_PER=1000 \
   logger-service:latest
 ```
 
-Bind the port only on a private interface or place the container on an internal
-Docker network. Do not publish it directly to a public host interface.
+For production, bind the port only on a private interface or place the container
+behind an authenticated private gateway.
 
-### Kubernetes Deployment
+## Kubernetes Notes
 
-Create a deployment manifest:
+Use a `Secret` for `LOGGER_API_KEY`.
+
+Expose the service as `ClusterIP` unless an internal load balancer is required.
+
+Mount durable storage for JSONL files:
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: logger-service
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: logger-service
-  template:
-    metadata:
-      labels:
-        app: logger-service
-    spec:
-      containers:
-        - name: logger-service
-          image: logger-service:latest
-          ports:
-            - containerPort: 8080
-          env:
-            - name: LOGGING_LEVEL
-              value: "warn"
-            - name: SERVER_MAX_BODY_BYTES
-              value: "1048576"
-            - name: SERVER_MAX_CONNECTIONS
-              value: "100"
-            - name: RATE_LIMIT_ENABLED
-              value: "true"
-            - name: RATE_LIMIT_REQUESTS_PER
-              value: "5000"
-          volumeMounts:
-            - name: logs
-              mountPath: /app/logs
-      volumes:
-        - name: logs
-          persistentVolumeClaim:
-            claimName: logger-logs-pvc
+volumeMounts:
+  - name: logs
+    mountPath: /app/logs
+volumes:
+  - name: logs
+    persistentVolumeClaim:
+      claimName: logger-logs-pvc
 ```
 
-For Kubernetes, store credentials in a `Secret`, inject them with
-`envFrom` or `valueFrom`, and expose the service with `ClusterIP` unless an
-internal load balancer is explicitly required. Add a `NetworkPolicy` that
-allows ingress only from the producer namespace or internal gateway. Configure
-the ingress controller with TLS, authentication, request-size limits, and a
-distributed rate limiter before traffic reaches the replicas.
+Inject configuration:
 
-The in-process limiter does not coordinate multiple replicas. Because JSON
-storage is currently single-writer, deploy one logger-service instance per JSON
-data directory. If horizontal scaling becomes necessary, add a centralized
-storage adapter and shared rate limiter before increasing the replica count.
+```yaml
+env:
+  - name: LOGGER_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: logger-service-secrets
+        key: api-key
+  - name: STORAGE_DATA_DIR
+    value: /app/logs
+  - name: RATE_LIMIT_ENABLED
+    value: "true"
+  - name: RATE_LIMIT_REQUESTS_PER
+    value: "1000"
+```
 
-## Monitoring
+## Roadmap
 
-The service exposes a health check endpoint at `/health` that can be used by load balancers and monitoring systems.
-
-### Metrics to Monitor
-
-- Request rate and response times
-- Storage usage and file rotation
-- Error rates and log levels
-- Buffer utilization
-
-## Future Enhancements
-
-- [ ] Authentication and authorization
-- [ ] Elasticsearch/Loki integration
-- [ ] GraphQL API
-- [ ] Advanced filtering and search
-- [ ] Log aggregation and analytics
-- [ ] Service mesh integration (Kafka, RabbitMQ)
-- [ ] Metrics and monitoring integration
-- [ ] Multi-region support
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+- Add a query/read API for persisted events.
+- Add monitor-mode WebSocket subscriptions for live event streams.
+- Add distributed storage backends such as Redis Streams, Kafka, PostgreSQL,
+  Elasticsearch, Loki, or object storage.
+- Add gateway-integrated authentication and authorization.
+- Add structured metrics and tracing.
+- Add native TLS option for direct deployments.
+- Add distributed rate limiting for multi-replica deployments.
 
 ## License
 
-[Add your license here]
+Add your license here.
