@@ -3,18 +3,18 @@ package security
 import (
 	"testing"
 
-	"github.com/hftamayo/gologger/internal/domain/entities"
+	"github.com/hftamayo/gologger/internal/contracts"
 )
 
-func TestRedactLogDataRedactsSensitiveMessagePatterns(t *testing.T) {
-	data := entities.LogData{
+func TestRedactEventRedactsSensitiveMessagePatterns(t *testing.T) {
+	event := contracts.Event{
 		Code:    "token=fixture-value",
 		Message: "request failed password=fixture-value",
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	if result.Code != "[REDACTED]" {
+	if result.Code != redactedValue {
 		t.Fatalf("expected redacted code, got %q", result.Code)
 	}
 
@@ -23,55 +23,50 @@ func TestRedactLogDataRedactsSensitiveMessagePatterns(t *testing.T) {
 	}
 }
 
-func TestRedactLogDataRedactsBearerValues(t *testing.T) {
-	data := entities.LogData{
+func TestRedactEventRedactsBearerValues(t *testing.T) {
+	event := contracts.Event{
 		Message: "authorization Bearer fixture-token",
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
 	if result.Message != "authorization [REDACTED]" {
 		t.Fatalf("expected bearer value to be redacted, got %q", result.Message)
 	}
 }
 
-func TestRedactLogDataRedactsSensitiveMapKeys(t *testing.T) {
+func TestRedactEventRedactsSensitiveMapKeys(t *testing.T) {
 	passwordKey := "pass" + "word"
 	tokenKey := "to" + "ken"
 
-	data := entities.LogData{
-		Extra: map[string]any{
+	event := contracts.Event{
+		Metadata: map[string]any{
 			passwordKey: "fixture-value",
 			tokenKey:    "fixture-value",
 			"safeValue": "visible",
 		},
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	extra, ok := result.Extra.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result.Extra)
+	if result.Metadata[passwordKey] != redactedValue {
+		t.Fatalf("expected password field to be redacted, got %#v", result.Metadata[passwordKey])
 	}
 
-	if extra[passwordKey] != "[REDACTED]" {
-		t.Fatalf("expected password field to be redacted, got %#v", extra[passwordKey])
+	if result.Metadata[tokenKey] != redactedValue {
+		t.Fatalf("expected token field to be redacted, got %#v", result.Metadata[tokenKey])
 	}
 
-	if extra[tokenKey] != "[REDACTED]" {
-		t.Fatalf("expected token field to be redacted, got %#v", extra[tokenKey])
-	}
-
-	if extra["safeValue"] != "visible" {
-		t.Fatalf("expected safe value to remain unchanged, got %#v", extra["safeValue"])
+	if result.Metadata["safeValue"] != "visible" {
+		t.Fatalf("expected safe value to remain unchanged, got %#v", result.Metadata["safeValue"])
 	}
 }
 
-func TestRedactLogDataRedactsNestedValues(t *testing.T) {
+func TestRedactEventRedactsNestedValues(t *testing.T) {
 	secretKey := "sec" + "ret"
 
-	data := entities.LogData{
-		Extra: map[string]any{
+	event := contracts.Event{
+		Context: map[string]any{
 			"nested": map[string]any{
 				secretKey: "fixture-value",
 				"message": "token=fixture-value",
@@ -79,44 +74,45 @@ func TestRedactLogDataRedactsNestedValues(t *testing.T) {
 		},
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	extra := result.Extra.(map[string]any)
-	nested := extra["nested"].(map[string]any)
+	nested := result.Context["nested"].(map[string]any)
 
-	if nested[secretKey] != "[REDACTED]" {
+	if nested[secretKey] != redactedValue {
 		t.Fatalf("expected nested secret to be redacted")
 	}
 
-	if nested["message"] != "[REDACTED]" {
+	if nested["message"] != redactedValue {
 		t.Fatalf("expected nested token value to be redacted")
 	}
 }
 
-func TestRedactLogDataRedactsValuesInsideArrays(t *testing.T) {
-	data := entities.LogData{
-		Extra: []any{
-			"token=fixture-value",
-			map[string]any{
-				"credential": "fixture-value",
+func TestRedactEventRedactsValuesInsideArrays(t *testing.T) {
+	event := contracts.Event{
+		Metadata: map[string]any{
+			"values": []any{
+				"token=fixture-value",
+				map[string]any{
+					"credential": "fixture-value",
+				},
+				"safe fixture value",
 			},
-			"safe fixture value",
 		},
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	values, ok := result.Extra.([]any)
+	values, ok := result.Metadata["values"].([]any)
 	if !ok {
-		t.Fatalf("expected []any, got %T", result.Extra)
+		t.Fatalf("expected []any, got %T", result.Metadata["values"])
 	}
 
-	if values[0] != "[REDACTED]" {
+	if values[0] != redactedValue {
 		t.Fatalf("expected array token to be redacted, got %#v", values[0])
 	}
 
 	nested := values[1].(map[string]any)
-	if nested["credential"] != "[REDACTED]" {
+	if nested["credential"] != redactedValue {
 		t.Fatalf("expected array object secret to be redacted")
 	}
 
@@ -125,12 +121,12 @@ func TestRedactLogDataRedactsValuesInsideArrays(t *testing.T) {
 	}
 }
 
-func TestRedactLogDataRemovesControlCharacters(t *testing.T) {
-	data := entities.LogData{
+func TestRedactEventRemovesControlCharacters(t *testing.T) {
+	event := contracts.Event{
 		Message: "line-one\nline-two\rline-three\tindented",
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
 	expected := "line-oneline-twoline-three\tindented"
 	if result.Message != expected {
@@ -142,94 +138,88 @@ func TestRedactLogDataRemovesControlCharacters(t *testing.T) {
 	}
 }
 
-func TestRedactLogDataSanitizesContextFields(t *testing.T) {
-	data := entities.LogData{
-		Context: entities.LogContext{
-			UserID:             "user-token=fixture-value",
-			SessionID:          "session-id",
-			Endpoint:           "/users\r\n/fixture",
-			Method:             "POST",
-			Domain:             "example.test",
-			RequiredPermission: "permission",
-		},
+func TestRedactEventSanitizesEventFields(t *testing.T) {
+	event := contracts.Event{
+		UserID:    "user-token=fixture-value",
+		SessionID: "session-id",
+		Service:   "orders\r\n-service",
+		EventType: "order.created",
+		Message:   "Order created",
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	if result.Context.UserID != "user-[REDACTED]" {
+	if result.UserID != "user-[REDACTED]" {
 		t.Fatalf(
-			"expected context user ID to be redacted, got %q",
-			result.Context.UserID,
+			"expected user ID to be redacted, got %q",
+			result.UserID,
 		)
 	}
 
-	if result.Context.Endpoint != "/users/fixture" {
+	if result.Service != "orders-service" {
 		t.Fatalf(
-			"expected endpoint control characters to be removed, got %q",
-			result.Context.Endpoint,
+			"expected service control characters to be removed, got %q",
+			result.Service,
 		)
 	}
 
-	if result.Context.SessionID != "session-id" {
+	if result.SessionID != "session-id" {
 		t.Fatalf("expected safe session ID to remain unchanged")
 	}
 }
 
-func TestRedactLogDataPreservesSafeValuesAndTypes(t *testing.T) {
-	data := entities.LogData{
+func TestRedactEventPreservesSafeValuesAndTypes(t *testing.T) {
+	event := contracts.Event{
 		Code:    "ORDER_CREATED",
 		Message: "Order created",
-		Extra: map[string]any{
+		Metadata: map[string]any{
 			"count":   3,
 			"active":  true,
 			"nothing": nil,
 		},
 	}
 
-	result := RedactLogData(data)
+	result := RedactEvent(event)
 
-	if result.Code != data.Code {
+	if result.Code != event.Code {
 		t.Fatalf("expected safe code to remain unchanged")
 	}
 
-	if result.Message != data.Message {
+	if result.Message != event.Message {
 		t.Fatalf("expected safe message to remain unchanged")
 	}
 
-	extra := result.Extra.(map[string]any)
-
-	if extra["count"] != 3 {
+	if result.Metadata["count"] != 3 {
 		t.Fatalf("expected numeric value to remain unchanged")
 	}
 
-	if extra["active"] != true {
+	if result.Metadata["active"] != true {
 		t.Fatalf("expected boolean value to remain unchanged")
 	}
 
-	if extra["nothing"] != nil {
+	if result.Metadata["nothing"] != nil {
 		t.Fatalf("expected nil value to remain unchanged")
 	}
 }
 
-func TestRedactLogData(t *testing.T) {
+func TestRedactEvent(t *testing.T) {
 	passwordField := "pass" + "word"
 	tokenField := "to" + "ken"
 
-	data := RedactLogData(entities.LogData{
+	event := RedactEvent(contracts.Event{
 		Message: tokenField + "=fixture-value\nvisible",
-		Extra: map[string]any{
+		Metadata: map[string]any{
 			passwordField: "fixture-value",
 			"nested":      tokenField + "=fixture-value",
 		},
 	})
 
-	if data.Message != "[REDACTED] visible" {
-		t.Fatalf("unexpected redacted message: %q", data.Message)
+	if event.Message != "[REDACTED]visible" {
+		t.Fatalf("unexpected redacted message: %q", event.Message)
 	}
 
-	extra := data.Extra.(map[string]any)
-	if extra[passwordField] != "[REDACTED]" ||
-		extra["nested"] != "[REDACTED]" {
-		t.Fatalf("unexpected redacted extra: %#v", extra)
+	if event.Metadata[passwordField] != redactedValue ||
+		event.Metadata["nested"] != redactedValue {
+		t.Fatalf("unexpected redacted metadata: %#v", event.Metadata)
 	}
 }
