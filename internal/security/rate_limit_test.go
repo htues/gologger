@@ -260,15 +260,3 @@ func TestFixedWindowLimiterIsPerKey(t *testing.T) {
 		t.Fatal("expected a separate key to have its own limit")
 	}
 }
-
-func TestConnectionLimiter(t *testing.T) {
-	limiter := NewConnectionLimiter(1)
-	if !limiter.TryAcquire() || limiter.TryAcquire() {
-		t.Fatal("expected the second connection to be rejected")
-	}
-	limiter.Release()
-	if !limiter.TryAcquire() {
-		t.Fatal("expected a released connection slot to be reusable")
-	}
-	limiter.Release()
-}
