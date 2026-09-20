@@ -11,7 +11,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/hftamayo/gologger/internal/adapters/config"
-	"github.com/hftamayo/gologger/internal/adapters/http"
 	"github.com/hftamayo/gologger/internal/adapters/storage"
 	"github.com/hftamayo/gologger/internal/domain/services"
 	"github.com/hftamayo/gologger/internal/security"

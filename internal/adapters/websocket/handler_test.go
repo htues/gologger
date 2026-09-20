@@ -1,4 +1,4 @@
-package websocket_test
+package websocket
 
 import (
 	"context"
