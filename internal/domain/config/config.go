@@ -3,7 +3,7 @@ package config
 import (
 	"time"
 
-	"github.com/hftamayo/gologger/internal/domain/entities"
+	"github.com/hftamayo/gologger/internal/contracts"
 )
 
 // Config holds all configuration for the logger service
@@ -35,9 +35,9 @@ type StorageConfig struct {
 
 // LoggingConfig holds logging-related configuration
 type LoggingConfig struct {
-	Level      entities.LogLevel `mapstructure:"level"`
-	Format     string            `mapstructure:"format"`
-	OutputPath string            `mapstructure:"output_path"`
+	Level      contracts.EventLevel `mapstructure:"level"`
+	Format     string               `mapstructure:"format"`
+	OutputPath string               `mapstructure:"output_path"`
 }
 
 // RateLimitConfig holds rate limiting configuration
@@ -62,11 +62,11 @@ func DefaultConfig() *Config {
 		Storage: StorageConfig{
 			DataDir:      "./logs",
 			RotationDays: 7,
-			MaxFileSize:  100 * 1024 * 1024, // 100MB
+			MaxFileSize:  100 * 1024 * 1024,
 			BufferSize:   1000,
 		},
 		Logging: LoggingConfig{
-			Level:      entities.LogLevelInfo,
+			Level:      contracts.EventLevelInfo,
 			Format:     "json",
 			OutputPath: "stdout",
 		},
