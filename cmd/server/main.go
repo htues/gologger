@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,19 +15,18 @@ import (
 	"github.com/hftamayo/gologger/internal/adapters/storage"
 	"github.com/hftamayo/gologger/internal/domain/services"
 	"github.com/hftamayo/gologger/internal/security"
+	"github.com/hftamayo/gologger/internal/websockets"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 func main() {
-	// Initialize logger
 	logger := initLogger()
 	defer logger.Sync()
 
 	logger.Info("Starting Logger Service")
 
-	// Load configuration
 	configLoader := config.NewViperConfigLoader()
 	cfg, err := configLoader.Load()
 	if err != nil {
@@ -35,13 +35,13 @@ func main() {
 
 	logger.Info("Configuration loaded",
 		zap.String("server.port", cfg.Server.Port),
-		zap.String("storage.data_dir", cfg.Storage.DataDir))
+		zap.String("storage.data_dir", cfg.Storage.DataDir),
+	)
 
-	// Initialize storage
 	storageAdapter, err := storage.NewJSONFileStorage(
 		cfg.Storage.DataDir,
-		cfg.Storage.RotationDays,
 		cfg.Storage.MaxFileSize,
+		cfg.Storage.RotationDays,
 		logger,
 	)
 	if err != nil {
@@ -49,33 +49,47 @@ func main() {
 	}
 	defer storageAdapter.Close()
 
-	// Initialize logger service
-	loggerService := services.NewLoggerService(storageAdapter, logger, &cfg.Logging.Level)
+	eventProcessor := services.EventProcessorService{}
 
-	// Initialize HTTP handler
-	handler := http.NewHandler(
-		loggerService,
+	websocketHandler := websockets.NewHandler(
 		storageAdapter,
-		logger,
+		eventProcessor,
+		os.Getenv("LOGGER_API_KEY"),
 	)
-	handler.SetConnectionLimiter(security.NewConnectionLimiter(cfg.Server.MaxConnections))
 
-	// Setup router
+	// Allow localhost without an API key only for local development.
+	if websocketHandler.APIKey == "" {
+		websocketHandler.AllowLocalhost = true
+	}
+
 	router := mux.NewRouter()
-	handler.RegisterRoutes(router)
+	router.Handle("/ws/events", websocketHandler).Methods(http.MethodGet)
+	router.HandleFunc("/health", healthHandler(storageAdapter)).Methods(http.MethodGet)
+	router.HandleFunc("/health/live", livenessHandler).Methods(http.MethodGet)
+	router.HandleFunc("/health/ready", readinessHandler(storageAdapter)).Methods(http.MethodGet)
 
-	// Setup CORS
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods: []string{
+			http.MethodGet,
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodDelete,
+			http.MethodOptions,
+		},
 		AllowedHeaders: []string{"*"},
 	})
 
-	// Create server
-	var protectedHandler http.Handler = corsMiddleware.Handler(http.MaxBytesHandler(router, cfg.Server.MaxBodyBytes))
+	var protectedHandler http.Handler = corsMiddleware.Handler(
+		http.MaxBytesHandler(router, cfg.Server.MaxBodyBytes),
+	)
+
 	if cfg.RateLimit.Enabled {
 		protectedHandler = security.Middleware(
-			security.NewFixedWindowLimiter(cfg.RateLimit.RequestsPer, cfg.RateLimit.Window),
+			security.NewFixedWindowLimiter(
+				cfg.RateLimit.RequestsPer,
+				cfg.RateLimit.Window,
+			),
 			security.ClientKey,
 			protectedHandler,
 		)
@@ -89,31 +103,81 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	// Start server in a goroutine
 	go func() {
 		logger.Info("Starting HTTP server", zap.String("address", server.Addr))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
 			logger.Fatal("Failed to start server", zap.Error(err))
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.Info("Shutting down server...")
 
-	// Create a deadline for server shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Attempt graceful shutdown
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("Server forced to shutdown", zap.Error(err))
 	}
 
 	logger.Info("Server exited")
+}
+
+func healthHandler(store interface {
+	Health(context.Context) error
+}) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		if err := store.Health(request.Context()); err != nil {
+			writeJSON(writer, http.StatusServiceUnavailable, map[string]any{
+				"status": "unhealthy",
+				"error":  "storage unavailable",
+			})
+			return
+		}
+
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"status":    "healthy",
+			"timestamp": time.Now().UTC(),
+			"service":   "logger-service",
+		})
+	}
+}
+
+func livenessHandler(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"status":    "alive",
+		"timestamp": time.Now().UTC(),
+	})
+}
+
+func readinessHandler(store interface {
+	Health(context.Context) error
+}) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		if err := store.Health(request.Context()); err != nil {
+			writeJSON(writer, http.StatusServiceUnavailable, map[string]any{
+				"status": "not_ready",
+				"error":  "storage unavailable",
+			})
+			return
+		}
+
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"status":    "ready",
+			"timestamp": time.Now().UTC(),
+		})
+	}
+}
+
+func writeJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+
+	_ = json.NewEncoder(writer).Encode(value)
 }
 
 // initLogger initializes the Zap logger
