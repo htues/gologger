@@ -2,20 +2,20 @@ package websockets
 
 import "github.com/hftamayo/gologger/internal/contracts"
 
+type Client struct {
+	send chan contracts.Event
+}
+
 type Hub struct {
-	// Registered clients.
-	clients map[*Client]bool
-	// Inbound messages from the clients.
-	broadcast chan contracts.LogEntry
-	// Register requests from the clients.
-	register chan *Client
-	// Unregister requests from clients.
+	clients    map[*Client]bool
+	broadcast  chan contracts.Event
+	register   chan *Client
 	unregister chan *Client
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		broadcast:  make(chan contracts.LogEntry),
+		broadcast:  make(chan contracts.Event),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
@@ -27,14 +27,20 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
+
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
 			}
-		case log := <-h.broadcast:
-			// Here is where you would call storage.Write(log)
-			// and also broadcast to any monitoring dashboard
+
+		case event := <-h.broadcast:
+			for client := range h.clients {
+				select {
+				case client.send <- event:
+				default:
+				}
+			}
 		}
 	}
 }
