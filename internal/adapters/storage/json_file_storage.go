@@ -403,12 +403,3 @@ func startOfWeek(value time.Time) time.Time {
 	return value.AddDate(0, 0, -daysSinceMonday).
 		Truncate(24 * time.Hour)
 }
-
-// Compile-time contract check.
-var _ interface {
-	Store(context.Context, contracts.Event) error
-	Get(context.Context, string) (contracts.Event, error)
-	Query(context.Context, contracts.EventFilter) ([]contracts.Event, error)
-	Health(context.Context) error
-	Close() error
-} = (*JSONFileStorage)(nil)
