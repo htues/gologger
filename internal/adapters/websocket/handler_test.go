@@ -23,6 +23,7 @@ func (testProcessor) Process(
 	if err := ctx.Err(); err != nil {
 		return contracts.Event{}, err
 	}
+
 	return event, nil
 }
 
@@ -35,6 +36,7 @@ func (processor *blockingProcessor) Process(
 	select {
 	case <-processor.release:
 		return event, nil
+
 	case <-ctx.Done():
 		return contracts.Event{}, ctx.Err()
 	}
@@ -51,6 +53,7 @@ func (store *testStore) Store(
 	select {
 	case store.stored <- event:
 		return nil
+
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -73,37 +76,42 @@ func (store *testStore) Query(
 func (*testStore) Health(context.Context) error { return nil }
 func (*testStore) Close() error                 { return nil }
 
-func TestEventHandlerRejectsWhenQueueIsFull(t *testing.T) {
+func TestDispatcherRejectsWhenQueueIsFull(t *testing.T) {
 	store := &testStore{stored: make(chan contracts.Event, 2)}
 	processor := &blockingProcessor{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	handler, err := NewEventHandler(processor, store, 1, 1)
+
+	dispatcher, err := NewDispatcher(processor, store, 1, 1)
 	if err != nil {
-		t.Fatalf("NewEventHandler returned error: %v", err)
+		t.Fatalf("NewDispatcher returned error: %v", err)
 	}
 
-	first, err := handler.Submit(context.Background(), testEvent("first"))
+	first, err := dispatcher.Submit(context.Background(), testEvent("first"))
 	if err != nil {
 		t.Fatalf("first Submit returned error: %v", err)
 	}
+
 	<-processor.started
 
-	if _, err = handler.Submit(
+	if _, err = dispatcher.Submit(
 		context.Background(),
 		testEvent("second"),
 	); err != nil {
 		t.Fatalf("second Submit returned error: %v", err)
 	}
 
-	_, err = handler.Submit(context.Background(), testEvent("third"))
+	_, err = dispatcher.Submit(context.Background(), testEvent("third"))
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("expected ErrQueueFull, got %v", err)
 	}
 
 	close(processor.release)
-	<-first
+
+	if result := <-first; result.Err != nil {
+		t.Fatalf("first event failed: %v", result.Err)
+	}
 
 	shutdownContext, cancel := context.WithTimeout(
 		context.Background(),
@@ -111,23 +119,25 @@ func TestEventHandlerRejectsWhenQueueIsFull(t *testing.T) {
 	)
 	defer cancel()
 
-	if _, err := handler.Shutdown(shutdownContext); err != nil {
+	if _, err := dispatcher.Shutdown(shutdownContext); err != nil {
 		t.Fatalf("Shutdown returned error: %v", err)
 	}
 }
 
-func TestEventHandlerDrainsAcceptedEvents(t *testing.T) {
+func TestDispatcherDrainsAcceptedEvents(t *testing.T) {
 	store := &testStore{stored: make(chan contracts.Event, 2)}
-	handler, err := NewEventHandler(testProcessor{}, store, 2, 1)
+
+	dispatcher, err := NewDispatcher(testProcessor{}, store, 2, 1)
 	if err != nil {
-		t.Fatalf("NewEventHandler returned error: %v", err)
+		t.Fatalf("NewDispatcher returned error: %v", err)
 	}
 
-	first, err := handler.Submit(context.Background(), testEvent("first"))
+	first, err := dispatcher.Submit(context.Background(), testEvent("first"))
 	if err != nil {
 		t.Fatalf("first Submit returned error: %v", err)
 	}
-	second, err := handler.Submit(context.Background(), testEvent("second"))
+
+	second, err := dispatcher.Submit(context.Background(), testEvent("second"))
 	if err != nil {
 		t.Fatalf("second Submit returned error: %v", err)
 	}
@@ -138,10 +148,11 @@ func TestEventHandlerDrainsAcceptedEvents(t *testing.T) {
 	)
 	defer cancel()
 
-	undrained, err := handler.Shutdown(shutdownContext)
+	undrained, err := dispatcher.Shutdown(shutdownContext)
 	if err != nil {
 		t.Fatalf("Shutdown returned error: %v", err)
 	}
+
 	if undrained != 0 {
 		t.Fatalf("expected no undrained events, got %d", undrained)
 	}
@@ -149,6 +160,7 @@ func TestEventHandlerDrainsAcceptedEvents(t *testing.T) {
 	if result := <-first; result.Err != nil {
 		t.Fatalf("first event failed: %v", result.Err)
 	}
+
 	if result := <-second; result.Err != nil {
 		t.Fatalf("second event failed: %v", result.Err)
 	}
