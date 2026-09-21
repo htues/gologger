@@ -136,11 +136,13 @@ func TestMiddlewareAllowsRequest(t *testing.T) {
 func TestMiddlewareRejectsRateLimitedRequest(t *testing.T) {
 	limiter := NewFixedWindowLimiter(1, time.Minute)
 
+	called := 0
 	next := http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		_ *http.Request,
 	) {
-		t.Fatal("next handler should not be called")
+		called++
+		writer.WriteHeader(http.StatusNoContent)
 	})
 
 	handler := Middleware(limiter, ClientKey, next)
@@ -154,6 +156,13 @@ func TestMiddlewareRejectsRateLimitedRequest(t *testing.T) {
 
 	firstRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(firstRecorder, firstRequest)
+
+	if firstRecorder.Code != http.StatusNoContent {
+		t.Fatalf(
+			"expected first request status 204, got %d",
+			firstRecorder.Code,
+		)
+	}
 
 	secondRequest := httptest.NewRequest(
 		http.MethodGet,
@@ -177,6 +186,10 @@ func TestMiddlewareRejectsRateLimitedRequest(t *testing.T) {
 			"expected Retry-After header 60, got %q",
 			secondRecorder.Header().Get("Retry-After"),
 		)
+	}
+
+	if called != 1 {
+		t.Fatalf("expected next handler to be called once, got %d", called)
 	}
 }
 
