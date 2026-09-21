@@ -51,7 +51,7 @@ func (client *connection) run() {
 
 	hello, err := client.performHandshake()
 	if err != nil {
-		client.sendError("", protocolError(err))
+		client.writeError("", protocolError(err))
 		return
 	}
 
@@ -335,6 +335,18 @@ func (client *connection) sendError(
 			Code:      code,
 			Message:   publicErrorMessage(code),
 		},
+	})
+}
+
+func (client *connection) writeError(
+	requestID string,
+	code string,
+) {
+	_ = client.writeJSON(contracts.ErrorMessage{
+		Type:      contracts.MessageTypeError,
+		RequestID: requestID,
+		Code:      code,
+		Message:   publicErrorMessage(code),
 	})
 }
 

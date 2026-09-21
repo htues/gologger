@@ -30,8 +30,34 @@ func (processor *fakeEventProcessor) Process(
 		return processor.processFunc(ctx, event)
 	}
 
-	event.EventID = "processed-event-id"
+	if err := ctx.Err(); err != nil {
+		return contracts.Event{}, err
+	}
+
 	return event, nil
+}
+
+type blockingDispatcherProcessor struct {
+	startedOnce sync.Once
+	started     chan struct{}
+	release     chan struct{}
+}
+
+func (processor *blockingDispatcherProcessor) Process(
+	ctx context.Context,
+	event contracts.Event,
+) (contracts.Event, error) {
+	processor.startedOnce.Do(func() {
+		close(processor.started)
+	})
+
+	select {
+	case <-processor.release:
+		return event, nil
+
+	case <-ctx.Done():
+		return contracts.Event{}, ctx.Err()
+	}
 }
 
 type fakeEventStore struct {
@@ -304,13 +330,9 @@ func TestDispatcherSubmitReturnsStoreError(t *testing.T) {
 }
 
 func TestDispatcherSubmitReturnsQueueFull(t *testing.T) {
-	blockProcessor := make(chan struct{})
-
-	processor := &fakeEventProcessor{
-		processFunc: func(ctx context.Context, event contracts.Event) (contracts.Event, error) {
-			<-blockProcessor
-			return event, nil
-		},
+	processor := &blockingDispatcherProcessor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
 	}
 	store := &fakeEventStore{}
 
@@ -320,16 +342,14 @@ func TestDispatcherSubmitReturnsQueueFull(t *testing.T) {
 	}
 
 	defer func() {
-		close(blockProcessor)
+		close(processor.release)
 		shutdownDispatcher(t, dispatcher)
 	}()
 
-	firstResult, err := dispatcher.Submit(context.Background(), contracts.Event{
-		Level:     contracts.EventLevelInfo,
-		Service:   "api",
-		EventType: "first",
-		Message:   "first",
-	})
+	firstResult, err := dispatcher.Submit(
+		context.Background(),
+		dispatcherTestEvent("first"),
+	)
 	if err != nil {
 		t.Fatalf("expected first submit to succeed, got error: %v", err)
 	}
@@ -338,12 +358,12 @@ func TestDispatcherSubmitReturnsQueueFull(t *testing.T) {
 		t.Fatal("expected first result channel")
 	}
 
-	secondResult, err := dispatcher.Submit(context.Background(), contracts.Event{
-		Level:     contracts.EventLevelInfo,
-		Service:   "api",
-		EventType: "second",
-		Message:   "second",
-	})
+	<-processor.started
+
+	secondResult, err := dispatcher.Submit(
+		context.Background(),
+		dispatcherTestEvent("second"),
+	)
 	if err != nil {
 		t.Fatalf("expected second submit to fill queue, got error: %v", err)
 	}
@@ -352,12 +372,10 @@ func TestDispatcherSubmitReturnsQueueFull(t *testing.T) {
 		t.Fatal("expected second result channel")
 	}
 
-	thirdResult, err := dispatcher.Submit(context.Background(), contracts.Event{
-		Level:     contracts.EventLevelInfo,
-		Service:   "api",
-		EventType: "third",
-		Message:   "third",
-	})
+	thirdResult, err := dispatcher.Submit(
+		context.Background(),
+		dispatcherTestEvent("third"),
+	)
 
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("expected ErrQueueFull, got %v", err)
@@ -486,5 +504,15 @@ func shutdownDispatcher(
 	pending, err := dispatcher.Shutdown(ctx)
 	if err != nil {
 		t.Fatalf("expected shutdown to succeed, got pending=%d err=%v", pending, err)
+	}
+}
+
+func dispatcherTestEvent(eventID string) contracts.Event {
+	return contracts.Event{
+		EventID:   eventID,
+		Level:     contracts.EventLevelInfo,
+		Service:   "test-service",
+		EventType: "test_event",
+		Message:   "test message",
 	}
 }

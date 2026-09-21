@@ -13,9 +13,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/hftamayo/gologger/internal/adapters/config"
 	"github.com/hftamayo/gologger/internal/adapters/storage"
+	"github.com/hftamayo/gologger/internal/adapters/websocket"
 	"github.com/hftamayo/gologger/internal/domain/services"
 	"github.com/hftamayo/gologger/internal/security"
-	"github.com/hftamayo/gologger/internal/websockets"
 	"github.com/rs/cors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -51,11 +51,14 @@ func main() {
 
 	eventProcessor := services.EventProcessorService{}
 
-	websocketHandler := websockets.NewHandler(
+	websocketHandler, err := websocket.NewHandler(
 		storageAdapter,
 		eventProcessor,
 		os.Getenv("LOGGER_API_KEY"),
 	)
+	if err != nil {
+		logger.Fatal("Failed to initialize websocket handler", zap.Error(err))
+	}
 
 	// Allow localhost without an API key only for local development.
 	if websocketHandler.APIKey == "" {

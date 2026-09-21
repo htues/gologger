@@ -376,6 +376,8 @@ func TestConnectionMonitorReceivesPublishedEvent(t *testing.T) {
 		},
 	})
 
+	waitForConnectionTestSubscription(t, handler)
+
 	handler.dispatcher.publisher.Publish(contracts.Event{
 		EventID:   "published-event-123",
 		Level:     contracts.EventLevelInfo,
@@ -643,4 +645,32 @@ func (registry *connectionTestRegistry) delete(
 	defer registry.mu.Unlock()
 
 	delete(registry.values, handler)
+}
+
+func waitForConnectionTestSubscription(
+	t *testing.T,
+	handler *Handler,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+
+	for time.Now().Before(deadline) {
+		publisher, ok := handler.dispatcher.publisher.(*eventPublisher)
+		if !ok {
+			t.Fatal("expected dispatcher publisher to be *eventPublisher")
+		}
+
+		publisher.mu.RLock()
+		count := len(publisher.subscriptions)
+		publisher.mu.RUnlock()
+
+		if count > 0 {
+			return
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	t.Fatal("timed out waiting for monitor subscription")
 }
