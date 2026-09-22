@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24.0-alpine AS builder01
+FROM golang:1.25.0-alpine AS build-stage
 
 # Install git and ca-certificates
 RUN apk add --no-cache git ca-certificates
@@ -20,7 +20,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
 
 # Final stage
-FROM golang:1.24.0-alpine3.22 AS builder
+FROM golang:1.25.0-alpine3.22 AS runtime
 
 # Install certificates and create the non-root user
 RUN apk --no-cache add ca-certificates && \
@@ -31,7 +31,7 @@ RUN apk --no-cache add ca-certificates && \
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /app/main .
+COPY --from=build-stage /app/main .
 
 # Create logs directory
 RUN mkdir -p /app/logs && \
