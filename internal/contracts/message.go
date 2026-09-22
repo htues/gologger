@@ -6,13 +6,13 @@ import "time"
 type MessageType string
 
 const (
-	MessageTypeHello            MessageType = "hello"
-	MessageTypeReady            MessageType = "ready"
-	MessageTypeEvent            MessageType = "event"
-	MessageTypeAck              MessageType = "ack"
-	MessageTypeError            MessageType = "error"
-	MessageTypeSubscribe        MessageType = "subscribe"
-	MessageTypeSubscriptionAck  MessageType = "subscription_ack"
+	MessageTypeHello           MessageType = "hello"
+	MessageTypeReady           MessageType = "ready"
+	MessageTypeEvent           MessageType = "event"
+	MessageTypeAck             MessageType = "ack"
+	MessageTypeError           MessageType = "error"
+	MessageTypeSubscribe       MessageType = "subscribe"
+	MessageTypeSubscriptionAck MessageType = "subscription_ack"
 )
 
 // ConnectionMode identifies the role requested during the handshake.
@@ -78,7 +78,7 @@ type SubscriptionAckMessage struct {
 }
 
 const (
-	AckStatusAccepted     = "accepted"
+	AckStatusAccepted            = "accepted"
 	SubscriptionStatusSubscribed = "subscribed"
 )
 

@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	ErrEventNotFound = errors.New("event not found")
-	ErrStoreClosed   = errors.New("event store is closed")
+	ErrEventNotFound  = errors.New("event not found")
+	ErrStoreClosed    = errors.New("event store is closed")
 	ErrDuplicateEvent = errors.New("event already exists")
 )
 

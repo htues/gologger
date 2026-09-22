@@ -5,11 +5,11 @@ import (
 )
 
 type EventSubscription interface {
-    Events() <-chan contracts.Event
-    Close()
+	Events() <-chan contracts.Event
+	Close()
 }
 
 type EventPublisher interface {
-    Subscribe(filter contracts.EventFilter) EventSubscription
-    Publish(event contracts.Event)
+	Subscribe(filter contracts.EventFilter) EventSubscription
+	Publish(event contracts.Event)
 }
